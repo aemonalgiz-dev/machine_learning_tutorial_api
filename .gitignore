@@ -1,0 +1,18 @@
+# Virtual environment
+.venv/
+venv/
+
+# Byte-compiled
+__pycache__/
+*.py[cod]
+
+# Packaging / tooling
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Editor
+.idea/
+.vscode/
