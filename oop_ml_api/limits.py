@@ -8,13 +8,14 @@ are well defined rather than arbitrary. A request outside these bounds is a
 typed 422 with the limit named, never a slow compute or an out-of-memory.
 """
 
-MAX_POINTS = 200
+MAX_POINTS = 100
 """The most data points a single request may carry.
 
-Two is the minimum a line can be fitted through; two hundred is far more than a
-person drags into a teaching widget, and well below anything that would make the
-fit slow. The ceiling exists so a crafted request cannot turn a teaching
-endpoint into a compute job.
+Two is the minimum a line can be fitted through; one hundred is already far more
+than a person drags into a teaching widget by hand, and well below anything that
+would make the fit slow. The ceiling exists so a crafted request cannot turn a
+teaching endpoint into a compute job, and the widget enforces the same number on
+its own side so a learner meets the limit before the request is ever sent.
 """
 
 MIN_POINTS = 2
