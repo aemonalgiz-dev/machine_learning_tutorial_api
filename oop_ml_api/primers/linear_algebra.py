@@ -172,6 +172,73 @@ def transform(request: MatrixRequest) -> TransformResponse:
     )
 
 
+class ApplyRequest(MatrixRequest):
+    """A matrix and one arrow to run through it."""
+
+    vector: BoundedPoint
+
+
+class ApplyResponse(BaseModel):
+    """One arrow in, one arrow out, and how the two compare.
+
+    ``aligned`` is whether the image points along the same line as the input,
+    which is what being an eigen direction means, and ``factor`` is then the
+    stretch, negative when the image points the opposite way. ``angle_degrees``
+    is the turn between input and image, ``None`` when either has no length to
+    measure a turn against. The eigen directions ride along so the widget can
+    draw them without a second request.
+    """
+
+    image: PlanePoint
+    aligned: bool
+    factor: float | None
+    angle_degrees: float | None
+    eigen: list[EigenDirection]
+    has_real_eigen: bool
+
+
+@router.post("/apply", response_model=ApplyResponse)
+def apply(request: ApplyRequest) -> ApplyResponse:
+    """Send one arrow through the matrix and report whether it only stretched."""
+    matrix = np.array(
+        [[request.a, request.b], [request.c, request.d]], dtype=np.float64
+    )
+    vector = np.array([request.vector.x, request.vector.y], dtype=np.float64)
+    image = matrix @ vector
+
+    vector_length = float(np.hypot(vector[0], vector[1]))
+    image_length = float(np.hypot(image[0], image[1]))
+
+    aligned = False
+    factor: float | None = None
+    angle_degrees: float | None = None
+
+    if vector_length > 0.0 and image_length == 0.0:
+        # The matrix flattened this arrow to nothing, which is the stretch
+        # factor zero, an eigen direction of a singular matrix.
+        aligned = True
+        factor = 0.0
+    elif vector_length > 0.0:
+        cross = float(vector[0] * image[1] - vector[1] * image[0])
+        dot = float(vector @ image)
+        cosine = np.clip(dot / (vector_length * image_length), -1.0, 1.0)
+        angle_degrees = float(np.degrees(np.arccos(cosine)))
+        if abs(cross) <= 1e-9 * max(1.0, vector_length * image_length):
+            aligned = True
+            factor = dot / (vector_length * vector_length)
+
+    eigen = _real_eigen_directions(matrix)
+
+    return ApplyResponse(
+        image=_to_point(image),
+        aligned=aligned,
+        factor=factor,
+        angle_degrees=angle_degrees,
+        eigen=eigen,
+        has_real_eigen=bool(eigen),
+    )
+
+
 def _grid_segments() -> list[tuple[np.ndarray, np.ndarray]]:
     """The untransformed grid, one segment per grid line."""
     segments: list[tuple[np.ndarray, np.ndarray]] = []

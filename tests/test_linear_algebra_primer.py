@@ -124,3 +124,49 @@ class TestTransform:
         response = client.post(TRANSFORM, json={"a": 99, "b": 0, "c": 0, "d": 1})
 
         assert response.status_code == 422
+
+
+class TestApply:
+    APPLY = "/primers/linear-algebra/apply"
+    WORKED: ClassVar[dict[str, int]] = {"a": 2, "b": 1, "c": 1, "d": 2}
+
+    def test_an_arrow_on_the_eigen_line_only_stretches(self) -> None:
+        # (2, 2) lies along (1, 1), the worked matrix's factor-three direction.
+        body = client.post(
+            self.APPLY, json={**self.WORKED, "vector": {"x": 2, "y": 2}}
+        ).json()
+
+        assert body["image"] == {"x": 6.0, "y": 6.0}
+        assert body["aligned"] is True
+        assert abs(body["factor"] - 3.0) < 1e-9
+        assert abs(body["angle_degrees"]) < 1e-9
+
+    def test_an_arrow_off_the_eigen_lines_turns(self) -> None:
+        # (2, 0) maps to (4, 2), a turn of about 26.57 degrees.
+        body = client.post(
+            self.APPLY, json={**self.WORKED, "vector": {"x": 2, "y": 0}}
+        ).json()
+
+        assert body["image"] == {"x": 4.0, "y": 2.0}
+        assert body["aligned"] is False
+        assert body["factor"] is None
+        assert abs(body["angle_degrees"] - math.degrees(math.atan2(2, 4))) < 1e-9
+
+    def test_a_rotation_turns_every_arrow_a_quarter_turn(self) -> None:
+        body = client.post(
+            self.APPLY,
+            json={"a": 0, "b": -1, "c": 1, "d": 0, "vector": {"x": 3, "y": 1}},
+        ).json()
+
+        assert body["aligned"] is False
+        assert abs(body["angle_degrees"] - 90.0) < 1e-9
+        assert body["has_real_eigen"] is False
+
+    def test_the_zero_arrow_has_no_angle_to_report(self) -> None:
+        body = client.post(
+            self.APPLY, json={**self.WORKED, "vector": {"x": 0, "y": 0}}
+        ).json()
+
+        assert body["aligned"] is False
+        assert body["factor"] is None
+        assert body["angle_degrees"] is None
