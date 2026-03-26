@@ -204,3 +204,46 @@ def descend(request: DescendRequest) -> DescendResponse:
         outcome=outcome,  # type: ignore[arg-type]
         minimum=minimum,
     )
+
+
+class TangentRequest(BaseModel):
+    """A point on a curve to read the slope at."""
+
+    function: FunctionKey
+    x: float
+
+
+class CurveSlope(BaseModel):
+    """A point on the curve, and the slope of the tangent there."""
+
+    x: float
+    y: float
+    slope: float
+
+
+class TangentResponse(BaseModel):
+    """The curve to draw, and the one point the tangent is taken at."""
+
+    curve: list[CurvePoint]
+    window: Window
+    point: CurveSlope
+
+
+@router.post("/tangent", response_model=TangentResponse)
+def tangent(request: TangentRequest) -> TangentResponse:
+    """The slope of a curve at a single point, for the tangent explorer.
+
+    The step before descent: no walk, just the derivative at one place. Drag the
+    point and the slope changes, negative where the curve falls, positive where
+    it rises, and zero where it turns around. The x is clamped onto the drawn
+    curve so the point cannot be dragged off it.
+    """
+    function = PRESETS.get(request.function)
+    if function is None:  # pragma: no cover - Literal makes this unreachable
+        raise HTTPException(status_code=422, detail="unknown function")
+
+    x = float(np.clip(request.x, function.x_min, function.x_max))
+    curve, window = _sample_curve(function)
+    point = CurveSlope(x=x, y=function.value(x), slope=function.slope(x))
+
+    return TangentResponse(curve=curve, window=window, point=point)

@@ -70,6 +70,37 @@ class TestDescent:
         assert body["minimum"] is None
 
 
+class TestTangent:
+    def test_the_slope_is_zero_at_the_bowl_minimum(self) -> None:
+        # 0.5 (x - 1)^2 + 2 turns around at x = 1, where its slope is zero.
+        body = client.post(
+            "/primers/calculus/tangent", json={"function": "bowl", "x": 1.0}
+        ).json()
+
+        assert abs(body["point"]["slope"]) < 1e-9
+
+    def test_the_slope_is_negative_on_the_way_down(self) -> None:
+        body = client.post(
+            "/primers/calculus/tangent", json={"function": "bowl", "x": -2.0}
+        ).json()
+
+        assert body["point"]["slope"] < 0.0
+
+    def test_the_slope_is_positive_on_the_way_up(self) -> None:
+        body = client.post(
+            "/primers/calculus/tangent", json={"function": "bowl", "x": 4.0}
+        ).json()
+
+        assert body["point"]["slope"] > 0.0
+
+    def test_a_point_dragged_off_the_curve_is_pulled_back_on(self) -> None:
+        body = client.post(
+            "/primers/calculus/tangent", json={"function": "bowl", "x": 999.0}
+        ).json()
+
+        assert body["point"]["x"] == 6.0  # the bowl's right edge
+
+
 class TestDrawing:
     def test_the_curve_spans_its_window(self) -> None:
         body = client.post(
