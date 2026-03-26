@@ -15,9 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from oop_ml_api.concepts import simple_linear_regression
 from oop_ml_api.errors import install_error_handling
+from oop_ml_api.primers import calculus
 
 CONCEPT_ROUTERS = (simple_linear_regression.router,)
 """Every concept the API serves. Adding one is appending its router here."""
+
+PRIMER_ROUTERS = (calculus.router,)
+"""The foundation-maths primers, kept separate because they are not models."""
 
 
 def allowed_origins() -> list[str]:
@@ -53,7 +57,7 @@ def create_app() -> FastAPI:
 
     install_error_handling(app)
 
-    for router in CONCEPT_ROUTERS:
+    for router in (*CONCEPT_ROUTERS, *PRIMER_ROUTERS):
         app.include_router(router)
 
     @app.get("/health", tags=["meta"])
