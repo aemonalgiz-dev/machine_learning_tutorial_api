@@ -101,6 +101,48 @@ class TestTangent:
         assert body["point"]["x"] == 6.0  # the bowl's right edge
 
 
+class TestSecant:
+    SECANT = "/primers/calculus/secant"
+
+    def test_the_secant_is_the_average_rate_across_the_gap(self) -> None:
+        # bowl: 0.5 x^2 - x + 2.5, so from x=3 to x=5 the average slope is
+        # (f(5) - f(3)) / 2 = (10 - 4) / 2 = 3.
+        body = client.post(
+            self.SECANT, json={"function": "bowl", "base": 3.0, "gap": 2.0}
+        ).json()
+
+        assert abs(body["secant_slope"] - 3.0) < 1e-9
+
+    def test_shrinking_the_gap_closes_in_on_the_derivative(self) -> None:
+        wide = client.post(
+            self.SECANT, json={"function": "bowl", "base": 3.0, "gap": 2.0}
+        ).json()
+        narrow = client.post(
+            self.SECANT, json={"function": "bowl", "base": 3.0, "gap": 0.001}
+        ).json()
+
+        tangent = wide["tangent_slope"]  # f'(3) = 2
+        assert abs(narrow["secant_slope"] - tangent) < abs(
+            wide["secant_slope"] - tangent
+        )
+        assert abs(narrow["secant_slope"] - tangent) < 1e-2
+
+    def test_the_second_point_folds_back_near_the_right_edge(self) -> None:
+        # base at the right edge (6) with a gap would fall off, so it folds left.
+        body = client.post(
+            self.SECANT, json={"function": "bowl", "base": 6.0, "gap": 2.0}
+        ).json()
+
+        assert body["second_point"]["x"] == 4.0
+
+    def test_a_zero_gap_is_refused(self) -> None:
+        response = client.post(
+            self.SECANT, json={"function": "bowl", "base": 3.0, "gap": 0.0}
+        )
+
+        assert response.status_code == 422
+
+
 class TestDrawing:
     def test_the_curve_spans_its_window(self) -> None:
         body = client.post(

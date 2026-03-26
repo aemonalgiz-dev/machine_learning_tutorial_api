@@ -247,3 +247,61 @@ def tangent(request: TangentRequest) -> TangentResponse:
     point = CurveSlope(x=x, y=function.value(x), slope=function.slope(x))
 
     return TangentResponse(curve=curve, window=window, point=point)
+
+
+class SecantRequest(BaseModel):
+    """A base point on the curve and a gap to the second point."""
+
+    function: FunctionKey
+    base: float
+    gap: float = Field(gt=0.0)
+
+
+class SecantResponse(BaseModel):
+    """The curve, the two points, and the two slopes to compare.
+
+    ``secant_slope`` is the average rate of change between the points; as the gap
+    shrinks it closes in on ``tangent_slope``, the derivative at the base point.
+    """
+
+    curve: list[CurvePoint]
+    window: Window
+    base_point: CurvePoint
+    second_point: CurvePoint
+    secant_slope: float
+    tangent_slope: float
+
+
+@router.post("/secant", response_model=SecantResponse)
+def secant(request: SecantRequest) -> SecantResponse:
+    """The average rate of change across a gap, and the derivative at its base.
+
+    The definition of the derivative made visible: draw a line through two points
+    on the curve, the secant, and its slope is the average rate of change between
+    them. Shrink the gap and the second point slides toward the base, the secant
+    rotates toward the tangent, and its slope closes in on the derivative. The
+    second point is placed a gap along the curve, folded back the other way near
+    the right edge so it always stays on the drawn curve.
+    """
+    function = PRESETS.get(request.function)
+    if function is None:  # pragma: no cover - Literal makes this unreachable
+        raise HTTPException(status_code=422, detail="unknown function")
+
+    base = float(np.clip(request.base, function.x_min, function.x_max))
+    if base + request.gap <= function.x_max:
+        second = base + request.gap
+    else:
+        second = max(function.x_min, base - request.gap)
+
+    curve, window = _sample_curve(function)
+    base_value = function.value(base)
+    second_value = function.value(second)
+
+    return SecantResponse(
+        curve=curve,
+        window=window,
+        base_point=CurvePoint(x=base, y=base_value),
+        second_point=CurvePoint(x=second, y=second_value),
+        secant_slope=(second_value - base_value) / (second - base),
+        tangent_slope=function.slope(base),
+    )
