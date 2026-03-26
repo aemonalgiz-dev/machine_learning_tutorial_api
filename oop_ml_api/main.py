@@ -15,12 +15,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from oop_ml_api.concepts import simple_linear_regression
 from oop_ml_api.errors import install_error_handling
-from oop_ml_api.primers import calculus
+from oop_ml_api.primers import calculus, linear_algebra
 
 CONCEPT_ROUTERS = (simple_linear_regression.router,)
 """Every concept the API serves. Adding one is appending its router here."""
 
-PRIMER_ROUTERS = (calculus.router,)
+PRIMER_ROUTERS = (calculus.router, linear_algebra.router)
 """The foundation-maths primers, kept separate because they are not models."""
 
 
