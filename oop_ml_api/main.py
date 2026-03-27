@@ -13,11 +13,19 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from oop_ml_api.concepts import simple_linear_regression
+from oop_ml_api.concepts import (
+    penalised_regression,
+    polynomial_regression,
+    simple_linear_regression,
+)
 from oop_ml_api.errors import install_error_handling
 from oop_ml_api.primers import calculus, linear_algebra, statistics
 
-CONCEPT_ROUTERS = (simple_linear_regression.router,)
+CONCEPT_ROUTERS = (
+    simple_linear_regression.router,
+    polynomial_regression.router,
+    penalised_regression.router,
+)
 """Every concept the API serves. Adding one is appending its router here."""
 
 PRIMER_ROUTERS = (calculus.router, linear_algebra.router, statistics.router)
