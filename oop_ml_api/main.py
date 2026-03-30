@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from oop_ml_api.concepts import (
     decision_tree,
+    ensembles,
     k_nearest,
     logistic_regression,
     penalised_regression,
@@ -31,6 +32,7 @@ CONCEPT_ROUTERS = (
     logistic_regression.router,
     k_nearest.router,
     decision_tree.router,
+    ensembles.router,
 )
 """Every concept the API serves. Adding one is appending its router here."""
 
