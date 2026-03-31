@@ -21,6 +21,7 @@ from oop_ml_api.concepts import (
     penalised_regression,
     polynomial_regression,
     simple_linear_regression,
+    unsupervised,
 )
 from oop_ml_api.errors import install_error_handling
 from oop_ml_api.primers import calculus, linear_algebra, statistics
@@ -33,6 +34,7 @@ CONCEPT_ROUTERS = (
     k_nearest.router,
     decision_tree.router,
     ensembles.router,
+    unsupervised.router,
 )
 """Every concept the API serves. Adding one is appending its router here."""
 
