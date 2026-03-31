@@ -17,6 +17,7 @@ from oop_ml_api.concepts import (
     decision_tree,
     ensembles,
     k_nearest,
+    kernel_trick,
     logistic_regression,
     penalised_regression,
     polynomial_regression,
@@ -35,6 +36,7 @@ CONCEPT_ROUTERS = (
     decision_tree.router,
     ensembles.router,
     unsupervised.router,
+    kernel_trick.router,
 )
 """Every concept the API serves. Adding one is appending its router here."""
 
