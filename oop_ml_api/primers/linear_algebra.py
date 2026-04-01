@@ -314,3 +314,44 @@ def _real_eigen_directions(matrix: np.ndarray) -> list[EigenDirection]:
         )
 
     return kept
+
+
+class SingleVectorRequest(BaseModel):
+    """One arrow to measure on its own."""
+
+    vector: BoundedPoint
+
+    model_config = {"extra": "forbid"}
+
+
+class SingleVectorResponse(BaseModel):
+    """The arrow taken apart: its two walks, their squares, and its length.
+
+    The squares are returned alongside the length so the widget can show the
+    Pythagoras arithmetic assembling, east squared plus north squared under
+    the root, instead of asserting the result.
+    """
+
+    east: float
+    north: float
+    east_squared: float
+    north_squared: float
+    length_squared: float
+    length: float
+
+
+@router.post("/vector", response_model=SingleVectorResponse)
+def vector(request: SingleVectorRequest) -> SingleVectorResponse:
+    """Measure one vector the way the primer's prose does by hand."""
+    east = float(request.vector.x)
+    north = float(request.vector.y)
+    length = float(np.hypot(east, north))
+
+    return SingleVectorResponse(
+        east=east,
+        north=north,
+        east_squared=east * east,
+        north_squared=north * north,
+        length_squared=east * east + north * north,
+        length=length,
+    )

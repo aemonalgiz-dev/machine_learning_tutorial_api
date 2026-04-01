@@ -184,3 +184,26 @@ class TestRefusals:
         )
 
         assert response.status_code == 422
+
+
+class TestLineSlope:
+    """Rise over run between two points, the primer's first ratio."""
+
+    def test_rise_over_run(self) -> None:
+        response = client.post(
+            "/primers/calculus/line-slope",
+            json={"first": {"x": 1.0, "y": 2.0}, "second": {"x": 3.0, "y": 8.0}},
+        )
+
+        body = response.json()
+        assert body["rise"] == 6.0
+        assert body["run"] == 2.0
+        assert body["slope"] == 3.0
+
+    def test_a_vertical_pair_has_no_slope(self) -> None:
+        response = client.post(
+            "/primers/calculus/line-slope",
+            json={"first": {"x": 2.0, "y": 1.0}, "second": {"x": 2.0, "y": 9.0}},
+        )
+
+        assert response.json()["slope"] is None

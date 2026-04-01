@@ -170,3 +170,27 @@ class TestApply:
         assert body["aligned"] is False
         assert body["factor"] is None
         assert body["angle_degrees"] is None
+
+
+class TestSingleVector:
+    """One arrow measured alone, the primer's first picture."""
+
+    def test_the_three_four_five_triangle(self) -> None:
+        response = client.post(
+            "/primers/linear-algebra/vector", json={"vector": {"x": 3.0, "y": 4.0}}
+        )
+
+        body = response.json()
+        assert body["east"] == 3.0
+        assert body["north"] == 4.0
+        assert body["east_squared"] == 9.0
+        assert body["north_squared"] == 16.0
+        assert body["length_squared"] == 25.0
+        assert body["length"] == 5.0
+
+    def test_a_zero_vector_has_zero_length(self) -> None:
+        response = client.post(
+            "/primers/linear-algebra/vector", json={"vector": {"x": 0.0, "y": 0.0}}
+        )
+
+        assert response.json()["length"] == 0.0

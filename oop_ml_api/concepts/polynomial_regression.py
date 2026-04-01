@@ -189,3 +189,52 @@ def fit_plane(request: PlaneFitRequest) -> PlaneFitResponse:
         ages_axis=[float(value) for value in ages_axis],
         surface=[[float(value) for value in row] for row in surface],
     )
+
+
+class DegreeSweepRequest(BaseModel):
+    """The points, and the highest degree the sweep should climb to."""
+
+    points: list[Point] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+    max_degree: int = Field(ge=1, le=MAX_DEGREE)
+
+    model_config = {"extra": "forbid"}
+
+
+class DegreeScore(BaseModel):
+    """One degree of the sweep and the R² the fit reached there."""
+
+    degree: int
+    r_squared: float
+
+
+class DegreeSweepResponse(BaseModel):
+    """The whole staircase of fits, one score per degree."""
+
+    scores: list[DegreeScore]
+
+
+@router.post("/degree-sweep", response_model=DegreeSweepResponse)
+def degree_sweep(request: DegreeSweepRequest) -> DegreeSweepResponse:
+    """Fit every degree from one upward and report each R².
+
+    The sweep stops early where the points run out, since a degree needs one
+    more point than its power to pin down, so the response may hold fewer
+    scores than the request asked for rather than a refusal.
+    """
+    x_values = [point.x for point in request.points]
+    y_values = [point.y for point in request.points]
+
+    input_feature = Feature("t", x_values)
+    target = Feature("y", y_values)
+
+    highest = min(request.max_degree, len(request.points) - 1)
+    scores: list[DegreeScore] = []
+    for degree in range(1, highest + 1):
+        polynomial = PolynomialFeatures(degree=degree).fit([input_feature])
+        terms = polynomial.transform([input_feature])
+        model = MultipleLinearRegression().fit(terms, target)
+        scores.append(
+            DegreeScore(degree=degree, r_squared=float(model.score(terms, target)))
+        )
+
+    return DegreeSweepResponse(scores=scores)

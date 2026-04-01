@@ -7,6 +7,8 @@ points were generated from, so a wrong slope or a mislabelled residual fails
 here rather than in the browser.
 """
 
+from typing import ClassVar
+
 from fastapi.testclient import TestClient
 
 from oop_ml_api.main import create_app
@@ -69,3 +71,27 @@ class TestFitting:
         assert len(residuals) == 4
         assert any(residual > 0 for residual in residuals)
         assert any(residual < 0 for residual in residuals)
+
+
+class TestSquaresChartNumbers:
+    """The fields the squares chart draws, pinned to the page's arithmetic."""
+
+    FIVE_MEASURED_PEOPLE: ClassVar[list[dict]] = [
+        {"x": 160.0, "y": 58.0},
+        {"x": 165.0, "y": 66.0},
+        {"x": 170.0, "y": 68.0},
+        {"x": 175.0, "y": 74.0},
+        {"x": 180.0, "y": 74.0},
+    ]
+
+    def test_the_worked_sums_come_back_exactly(self) -> None:
+        response = client.post(
+            "/concepts/simple-linear-regression/fit",
+            json={"points": self.FIVE_MEASURED_PEOPLE},
+        )
+
+        body = response.json()
+        assert body["mean_target"] == 68.0
+        assert body["tss"] == 176.0
+        assert round(body["rss"], 6) == 16.0
+        assert round(1 - body["rss"] / body["tss"], 6) == round(body["r_squared"], 6)

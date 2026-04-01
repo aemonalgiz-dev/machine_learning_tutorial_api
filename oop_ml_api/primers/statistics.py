@@ -188,3 +188,50 @@ def sample(request: SampleRequest) -> SampleResponse:
         true_mean=TRUE_MEAN,
         true_standard_deviation=TRUE_STANDARD_DEVIATION,
     )
+
+
+class DescribeValuesRequest(BaseModel):
+    """A handful of single-feature values to take apart around their mean."""
+
+    values: list[BoundedValue] = Field(min_length=2, max_length=MAX_POINTS)
+
+    model_config = {"extra": "forbid"}
+
+
+class DescribeValuesResponse(BaseModel):
+    """The mean and everything the primer builds from it, in order.
+
+    ``deviation_total`` is returned rather than asserted so the widget can
+    show the cancellation the prose describes, the below balancing the above
+    to zero, before the squares repair it.
+    """
+
+    mean: float
+    deviations: list[float]
+    deviation_total: float
+    squared_deviations: list[float]
+    variance: float
+    standard_deviation: float
+
+
+@router.post("/describe-values", response_model=DescribeValuesResponse)
+def describe_values(request: DescribeValuesRequest) -> DescribeValuesResponse:
+    """Walk one list of values from mean to standard deviation.
+
+    Population divisor n throughout, like the summarize endpoint, so the
+    numbers match what a reader checks on paper.
+    """
+    values = np.asarray(request.values, dtype=np.float64)
+    mean = float(np.mean(values))
+    deviations = values - mean
+    squared = deviations**2
+    variance = float(np.mean(squared))
+
+    return DescribeValuesResponse(
+        mean=mean,
+        deviations=[float(value) for value in deviations],
+        deviation_total=float(np.sum(deviations)),
+        squared_deviations=[float(value) for value in squared],
+        variance=variance,
+        standard_deviation=float(np.sqrt(variance)),
+    )

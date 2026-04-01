@@ -66,6 +66,9 @@ class FitResponse(BaseModel):
     r_squared: float
     line: FittedLine
     residuals: list[float]
+    mean_target: float
+    rss: float
+    tss: float
 
 
 @router.post("/fit", response_model=FitResponse)
@@ -92,10 +95,12 @@ def fit(request: FitRequest) -> FitResponse:
 
     x_start, x_end = min(x_values), max(x_values)
 
+    evaluation = model.evaluate(Feature("x", x_values), Feature("y", y_values))
+
     return FitResponse(
         slope=model.slope,
         intercept=model.intercept,
-        r_squared=model.score(Feature("x", x_values), Feature("y", y_values)),
+        r_squared=float(evaluation.r2_score),
         line=FittedLine(
             x_start=x_start,
             y_start=model.slope * x_start + model.intercept,
@@ -103,6 +108,9 @@ def fit(request: FitRequest) -> FitResponse:
             y_end=model.slope * x_end + model.intercept,
         ),
         residuals=residuals,
+        mean_target=float(np.mean(y_values)),
+        rss=float(evaluation.residual_sum_of_squares),
+        tss=float(evaluation.total_sum_of_squares),
     )
 
 

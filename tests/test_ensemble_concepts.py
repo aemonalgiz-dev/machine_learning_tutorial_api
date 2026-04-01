@@ -8,6 +8,9 @@ The boosting page works two rounds on three points by hand, predictions 4, 7,
 7 after one round and 3.25, 6.25, 8.5 after two. All pinned here.
 """
 
+from itertools import pairwise
+from typing import ClassVar
+
 from fastapi.testclient import TestClient
 
 from oop_ml_api.main import create_app
@@ -142,6 +145,93 @@ class TestGradientBoosting:
         response = client.post(
             BOOSTING,
             json={"points": THREE_POINTS, "rounds": 301, "learning_rate": 0.3},
+        )
+
+        assert response.status_code == 422
+
+
+class TestLeaveOutCurve:
+    """The bootstrap's missing share, traced against the crowd size."""
+
+    def test_the_worked_numbers_sit_on_the_curve(self) -> None:
+        response = client.post(
+            "/concepts/ensembles/leave-out-curve", json={"max_crowd": 200}
+        )
+
+        body = response.json()
+        by_size = dict(zip(body["sizes"], body["probabilities"], strict=True))
+        assert round(by_size[25], 4) == 0.3604
+        assert round(body["limit"], 4) == 0.3679
+
+    def test_the_curve_settles_toward_the_limit(self) -> None:
+        response = client.post(
+            "/concepts/ensembles/leave-out-curve", json={"max_crowd": 500}
+        )
+
+        body = response.json()
+        gap_early = abs(body["probabilities"][10] - body["limit"])
+        gap_late = abs(body["probabilities"][-1] - body["limit"])
+        assert gap_late < gap_early
+        assert gap_late < 0.001
+
+
+class TestCommitteeVariance:
+    """The variance formula's curves, and the floors they cannot pass."""
+
+    def test_each_curve_holds_its_floor(self) -> None:
+        response = client.post(
+            "/concepts/ensembles/committee-variance", json={"max_members": 200}
+        )
+
+        body = response.json()
+        for curve in body["curves"]:
+            floor = curve["correlation"]
+            assert all(value > floor for value in curve["variances"])
+            assert abs(curve["variances"][-1] - floor) <= 0.005
+
+    def test_a_lone_member_always_costs_the_whole_variance(self) -> None:
+        response = client.post(
+            "/concepts/ensembles/committee-variance", json={"max_members": 10}
+        )
+
+        for curve in response.json()["curves"]:
+            assert curve["variances"][0] == 1.0
+
+
+class TestBoostingDescent:
+    """The leftovers falling round by round, the descent chart's staircase."""
+
+    THROWN_BALL: ClassVar[list[dict]] = [
+        {"x": time / 2, "y": 20 * (time / 2) - 4.9 * (time / 2) ** 2}
+        for time in range(9)
+    ]
+
+    def test_the_leftovers_never_grow(self) -> None:
+        response = client.post(
+            "/concepts/ensembles/boosting-descent",
+            json={"points": self.THROWN_BALL, "rounds": 30, "learning_rate": 0.5},
+        )
+
+        body = response.json()
+        sums = body["residual_sums"]
+        assert body["rounds"] == list(range(31))
+        assert all(later <= earlier + 1e-9 for earlier, later in pairwise(sums))
+
+    def test_round_zero_is_the_flat_mean_model(self) -> None:
+        response = client.post(
+            "/concepts/ensembles/boosting-descent",
+            json={"points": self.THROWN_BALL, "rounds": 5, "learning_rate": 0.5},
+        )
+
+        heights = [point["y"] for point in self.THROWN_BALL]
+        mean = sum(heights) / len(heights)
+        spread = sum((value - mean) ** 2 for value in heights)
+        assert abs(response.json()["residual_sums"][0] - spread) < 1e-6
+
+    def test_a_rate_past_one_is_refused_here_too(self) -> None:
+        response = client.post(
+            "/concepts/ensembles/boosting-descent",
+            json={"points": self.THROWN_BALL, "rounds": 5, "learning_rate": 1.5},
         )
 
         assert response.status_code == 422

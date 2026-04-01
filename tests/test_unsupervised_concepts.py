@@ -7,6 +7,9 @@ the matrix [[250, 150], [150, 250]], whose kept directions are the linear
 algebra primer's (1, 1) and (1, -1) with shares of 0.8 and 0.2. All pinned.
 """
 
+from itertools import pairwise
+from typing import ClassVar
+
 from fastapi.testclient import TestClient
 
 from oop_ml_api.main import create_app
@@ -112,3 +115,102 @@ class TestPca:
         response = client.post(PCA, json={"points": [{"x": 170, "y": 68}]})
 
         assert response.status_code == 422
+
+
+class TestInertiaCurve:
+    """The staircase the k-means chart draws, one pass budget at a time."""
+
+    UNLABELLED_CROWD: ClassVar[list[dict]] = [
+        {"x": 147.0, "y": 41.0},
+        {"x": 156.0, "y": 53.0},
+        {"x": 145.0, "y": 57.0},
+        {"x": 159.0, "y": 57.0},
+        {"x": 162.0, "y": 61.0},
+        {"x": 120.0, "y": 25.0},
+        {"x": 122.0, "y": 28.0},
+        {"x": 118.0, "y": 24.0},
+        {"x": 180.0, "y": 80.0},
+        {"x": 183.0, "y": 83.0},
+        {"x": 178.0, "y": 78.0},
+    ]
+
+    def test_the_total_only_falls_or_holds_still(self) -> None:
+        response = client.post(
+            "/concepts/k-means/inertia-curve",
+            json={"points": self.UNLABELLED_CROWD, "n_clusters": 2},
+        )
+
+        inertias = response.json()["inertias"]
+        assert len(inertias) == 12
+        assert all(later <= earlier + 1e-9 for earlier, later in pairwise(inertias))
+
+    def test_the_walk_comes_to_rest(self) -> None:
+        response = client.post(
+            "/concepts/k-means/inertia-curve",
+            json={"points": self.UNLABELLED_CROWD, "n_clusters": 2},
+        )
+
+        inertias = response.json()["inertias"]
+        assert inertias[-1] == inertias[-2]
+
+
+class TestVarianceSweep:
+    """The half-turn of variances the PCA chart draws."""
+
+    def sweep(self) -> dict:
+        response = client.post(
+            "/concepts/pca/variance-sweep",
+            json={
+                "points": [
+                    {"x": float(x), "y": float(0.8 * x - 68.0 + noise)}
+                    for x, noise in zip(
+                        range(150, 190, 2),
+                        [
+                            3,
+                            -2,
+                            1,
+                            -4,
+                            2,
+                            0,
+                            -1,
+                            3,
+                            -3,
+                            1,
+                            2,
+                            -2,
+                            0,
+                            4,
+                            -1,
+                            1,
+                            -3,
+                            2,
+                            0,
+                            -2,
+                        ],
+                        strict=True,
+                    )
+                ]
+            },
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_the_peak_is_the_first_component(self) -> None:
+        body = self.sweep()
+        best = max(body["components"], key=lambda entry: entry["variance"])
+        assert max(body["variances"]) <= best["variance"] + 1e-9
+
+    def test_the_curve_passes_through_both_components(self) -> None:
+        body = self.sweep()
+        for component in body["components"]:
+            nearest = min(
+                zip(body["angles_degrees"], body["variances"], strict=True),
+                key=lambda pair: abs(pair[0] - component["angle_degrees"]),
+            )
+            assert abs(nearest[1] - component["variance"]) < 0.5
+
+    def test_the_directions_are_a_quarter_turn_apart(self) -> None:
+        body = self.sweep()
+        first, second = body["components"]
+        separation = abs(first["angle_degrees"] - second["angle_degrees"])
+        assert round(min(separation, 180.0 - separation), 6) == 90.0

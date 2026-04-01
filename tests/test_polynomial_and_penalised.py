@@ -7,6 +7,7 @@ ordinary slope with the penalty added to its denominator. Both claims are
 pinned here so the prose cannot drift from what the library computes.
 """
 
+from itertools import pairwise
 from typing import ClassVar
 
 from fastapi.testclient import TestClient
@@ -149,3 +150,82 @@ class TestWorkedShrinkage:
             slope = next(iter(model.coefficients)).value
 
             assert abs(slope - 200.0 / (250.0 + penalty)) < 1e-9
+
+
+class TestDegreeSweep:
+    """The staircase of fits the degree chart draws."""
+
+    FIVE_MEASURED_PEOPLE: ClassVar[list[dict]] = [
+        {"x": 160.0, "y": 58.0},
+        {"x": 165.0, "y": 66.0},
+        {"x": 170.0, "y": 68.0},
+        {"x": 175.0, "y": 74.0},
+        {"x": 180.0, "y": 74.0},
+    ]
+
+    def test_r_squared_never_falls_as_the_degree_climbs(self) -> None:
+        response = client.post(
+            "/concepts/multiple-polynomial-regression/degree-sweep",
+            json={"points": self.FIVE_MEASURED_PEOPLE, "max_degree": 6},
+        )
+
+        scores = [entry["r_squared"] for entry in response.json()["scores"]]
+        assert all(later >= earlier - 1e-9 for earlier, later in pairwise(scores))
+
+    def test_the_sweep_stops_where_the_points_run_out(self) -> None:
+        response = client.post(
+            "/concepts/multiple-polynomial-regression/degree-sweep",
+            json={"points": self.FIVE_MEASURED_PEOPLE, "max_degree": 9},
+        )
+
+        degrees = [entry["degree"] for entry in response.json()["scores"]]
+        assert degrees == [1, 2, 3, 4]
+
+    def test_enough_points_reach_a_perfect_interpolation(self) -> None:
+        response = client.post(
+            "/concepts/multiple-polynomial-regression/degree-sweep",
+            json={"points": self.FIVE_MEASURED_PEOPLE, "max_degree": 4},
+        )
+
+        final = response.json()["scores"][-1]
+        assert final["degree"] == 4
+        assert final["r_squared"] > 0.9999
+
+
+class TestShrinkagePath:
+    """The two paths the ridge and lasso chart traces on the worked five."""
+
+    FIVE_MEASURED_PEOPLE: ClassVar[list[dict]] = [
+        {"x": 160.0, "y": 58.0},
+        {"x": 165.0, "y": 66.0},
+        {"x": 170.0, "y": 68.0},
+        {"x": 175.0, "y": 74.0},
+        {"x": 180.0, "y": 74.0},
+    ]
+
+    def path(self) -> dict:
+        response = client.post(
+            "/concepts/ridge-lasso/shrinkage-path",
+            json={"points": self.FIVE_MEASURED_PEOPLE},
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_the_ridge_path_is_the_worked_formula(self) -> None:
+        body = self.path()
+        for penalty, slope in zip(body["penalties"], body["ridge_slopes"], strict=True):
+            assert abs(slope - 200.0 / (250.0 + penalty)) < 1e-9
+
+    def test_ridge_never_reaches_zero_and_lasso_does(self) -> None:
+        body = self.path()
+        assert all(slope > 0.0 for slope in body["ridge_slopes"])
+        by_penalty = dict(zip(body["penalties"], body["lasso_slopes"], strict=True))
+        assert abs(by_penalty[0.0] - 0.8) < 1e-6
+        assert by_penalty[400.0] == 0.0
+        assert by_penalty[500.0] == 0.0
+
+    def test_the_lasso_path_subtracts_where_ridge_divides(self) -> None:
+        body = self.path()
+        by_penalty = dict(zip(body["penalties"], body["lasso_slopes"], strict=True))
+        assert abs(by_penalty[100.0] - 0.6) < 1e-6
+        assert abs(by_penalty[200.0] - 0.4) < 1e-6

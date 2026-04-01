@@ -7,6 +7,8 @@ question, is height below 151.5. The logistic page reads a boundary near 4.24
 hours off a fixed overlapping class. All of that is pinned here.
 """
 
+from typing import ClassVar
+
 from fastapi.testclient import TestClient
 
 from oop_ml_api.main import create_app
@@ -163,3 +165,71 @@ class TestDecisionTree:
 
         assert response.status_code == 422
         assert "nothing to separate" in response.json()["detail"]
+
+
+class TestLogisticBalance:
+    """The gaps the balance chart draws, and the condition they satisfy."""
+
+    def test_the_gaps_cancel_at_a_calm_rate(self) -> None:
+        points = [
+            {"x": 1.0, "label": 0},
+            {"x": 2.0, "label": 0},
+            {"x": 3.0, "label": 0},
+            {"x": 4.0, "label": 1},
+            {"x": 5.0, "label": 0},
+            {"x": 6.0, "label": 1},
+            {"x": 7.0, "label": 1},
+            {"x": 8.0, "label": 1},
+        ]
+        response = client.post(
+            "/concepts/logistic-regression/fit",
+            json={"points": points, "learning_rate": 0.1},
+        )
+
+        body = response.json()
+        assert len(body["gaps"]) == len(points)
+        assert abs(body["gap_total"]) < 0.05
+        assert body["gap_total"] == sum(body["gaps"])
+
+
+class TestRootCandidates:
+    """The sweep the trees page's gain chart draws, pinned to the clean crowd."""
+
+    CLEAN_CROWD: ClassVar[list[dict]] = [
+        {"x": 147.0, "y": 41.0, "label": 0},
+        {"x": 156.0, "y": 53.0, "label": 1},
+        {"x": 145.0, "y": 57.0, "label": 0},
+        {"x": 159.0, "y": 57.0, "label": 1},
+        {"x": 162.0, "y": 61.0, "label": 1},
+        {"x": 120.0, "y": 25.0, "label": 0},
+        {"x": 122.0, "y": 28.0, "label": 0},
+        {"x": 118.0, "y": 24.0, "label": 0},
+        {"x": 180.0, "y": 80.0, "label": 1},
+        {"x": 183.0, "y": 83.0, "label": 1},
+        {"x": 178.0, "y": 78.0, "label": 1},
+    ]
+
+    def search(self) -> dict:
+        response = client.post(
+            "/concepts/decision-trees/root-candidates",
+            json={"points": self.CLEAN_CROWD},
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_the_winner_matches_the_worked_example(self) -> None:
+        body = self.search()
+        assert body["best_feature"] == "height"
+        assert body["best_threshold"] == 151.5
+        assert round(body["best_gain"], 3) == 0.496
+
+    def test_no_candidate_beats_the_winner(self) -> None:
+        body = self.search()
+        assert all(
+            candidate["gain"] <= body["best_gain"] + 1e-12
+            for candidate in body["candidates"]
+        )
+
+    def test_both_features_were_scanned(self) -> None:
+        features = {candidate["feature"] for candidate in self.search()["candidates"]}
+        assert features == {"height", "weight"}

@@ -21,6 +21,8 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from oop_ml_api.limits import MAX_MAGNITUDE
+
 router = APIRouter(prefix="/primers/calculus", tags=["calculus-primer"])
 
 MAX_STEPS = 100
@@ -305,3 +307,46 @@ def secant(request: SecantRequest) -> SecantResponse:
         secant_slope=(second_value - base_value) / (second - base),
         tangent_slope=function.slope(base),
     )
+
+
+class LinePoint(BaseModel):
+    """A point a slope request supplies, held to the teaching range."""
+
+    x: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+    y: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+
+
+class LineSlopeRequest(BaseModel):
+    """Two points on a straight line."""
+
+    first: LinePoint
+    second: LinePoint
+
+    model_config = {"extra": "forbid"}
+
+
+class LineSlopeResponse(BaseModel):
+    """Rise, run, and their ratio.
+
+    ``slope`` is ``None`` when the run is zero, a vertical pair, where the
+    ratio does not exist rather than being large.
+    """
+
+    rise: float
+    run: float
+    slope: float | None
+
+
+@router.post("/line-slope", response_model=LineSlopeResponse)
+def line_slope(request: LineSlopeRequest) -> LineSlopeResponse:
+    """Measure rise over run between two points, the primer's first ratio."""
+    rise = float(request.second.y - request.first.y)
+    run = float(request.second.x - request.first.x)
+
+    slope: float | None
+    if run == 0.0:
+        slope = None
+    else:
+        slope = rise / run
+
+    return LineSlopeResponse(rise=rise, run=run, slope=slope)

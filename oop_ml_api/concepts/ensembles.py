@@ -174,3 +174,144 @@ def gradient_boosting(request: BoostingRequest) -> BoostingResponse:
             for x, y in zip(grid, curve_heights, strict=True)
         ],
     )
+
+
+MAX_CURVE_CROWD = 500
+"""The largest crowd the leave-out curve is traced up to."""
+
+MAX_CURVE_MEMBERS = 200
+"""The largest committee the variance curves are traced up to."""
+
+VARIANCE_CORRELATIONS = (0.0, 0.3, 0.6)
+"""The member correlations the variance chart draws, one curve each."""
+
+
+class LeaveOutCurveRequest(BaseModel):
+    """How large a crowd to trace the bootstrap's missing share up to."""
+
+    max_crowd: int = Field(ge=2, le=MAX_CURVE_CROWD)
+
+    model_config = {"extra": "forbid"}
+
+
+class LeaveOutCurveResponse(BaseModel):
+    """The chance one person dodges every draw, at each crowd size.
+
+    ``limit`` is 1/e, the number the curve settles toward as the crowd grows.
+    """
+
+    sizes: list[int]
+    probabilities: list[float]
+    limit: float
+
+
+@router.post("/leave-out-curve", response_model=LeaveOutCurveResponse)
+def leave_out_curve(request: LeaveOutCurveRequest) -> LeaveOutCurveResponse:
+    """Trace (1 - 1/n)^n, the bagging page's missing third, against n.
+
+    Formula rather than library arithmetic, the same standing the primers
+    have: the page derives this expression and the chart draws it settling.
+    """
+    sizes = list(range(2, request.max_crowd + 1))
+    probabilities = [float((1.0 - 1.0 / size) ** size) for size in sizes]
+    return LeaveOutCurveResponse(
+        sizes=sizes,
+        probabilities=probabilities,
+        limit=float(np.exp(-1.0)),
+    )
+
+
+class CommitteeVarianceRequest(BaseModel):
+    """How large a committee to trace the variance curves up to."""
+
+    max_members: int = Field(ge=2, le=MAX_CURVE_MEMBERS)
+
+    model_config = {"extra": "forbid"}
+
+
+class VarianceCurve(BaseModel):
+    """One correlation's curve, the committee variance at each size."""
+
+    correlation: float
+    variances: list[float]
+
+
+class CommitteeVarianceResponse(BaseModel):
+    """The committee variance formula traced for each drawn correlation.
+
+    A member's own variance is taken as 1, so every number is a share of it,
+    and each curve's floor is simply its correlation.
+    """
+
+    members: list[int]
+    curves: list[VarianceCurve]
+
+
+@router.post("/committee-variance", response_model=CommitteeVarianceResponse)
+def committee_variance(
+    request: CommitteeVarianceRequest,
+) -> CommitteeVarianceResponse:
+    """Trace rho + (1 - rho)/B for each correlation the chart draws."""
+    members = list(range(1, request.max_members + 1))
+    curves = [
+        VarianceCurve(
+            correlation=correlation,
+            variances=[
+                float(correlation + (1.0 - correlation) / size) for size in members
+            ],
+        )
+        for correlation in VARIANCE_CORRELATIONS
+    ]
+    return CommitteeVarianceResponse(members=members, curves=curves)
+
+
+class BoostingDescentRequest(BaseModel):
+    """The points, and the boosting run whose leftovers are to be traced."""
+
+    points: list[Point] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+    rounds: int = Field(ge=1, le=MAX_ROUNDS)
+    learning_rate: float = Field(gt=0.0, le=1.0)
+
+    model_config = {"extra": "forbid"}
+
+
+class BoostingDescentResponse(BaseModel):
+    """The residual sum of squares after each round, round zero included.
+
+    Round zero is the flat mean model the sequence starts from, so the first
+    entry is the target's total spread and every later one is what the
+    corrections had left.
+    """
+
+    rounds: list[int]
+    residual_sums: list[float]
+
+
+@router.post("/boosting-descent", response_model=BoostingDescentResponse)
+def boosting_descent(request: BoostingDescentRequest) -> BoostingDescentResponse:
+    """Replay a boosting fit round by round and measure each leftover.
+
+    One model is fitted at the full round count; the running predictions are
+    then rebuilt by walking its members in order from the initial mean, the
+    same accumulation ``predict`` performs, so the last entry agrees with the
+    fitted model exactly.
+    """
+    x_values = [point.x for point in request.points]
+    y_values = np.asarray([point.y for point in request.points], dtype=np.float64)
+    inputs = Feature("t", x_values)
+
+    model = GradientBoostingRegressor(
+        n_rounds=request.rounds, learning_rate=request.learning_rate, max_depth=1
+    ).fit([inputs], Feature("h", [float(value) for value in y_values]))
+
+    running = np.full(len(x_values), float(model.initial_prediction))
+    residual_sums = [float(np.sum((y_values - running) ** 2))]
+    for member in model.members:
+        member_answers = np.asarray(member.predict([inputs]), dtype=np.float64)
+        running = running + request.learning_rate * member_answers
+        residual_sums.append(float(np.sum((y_values - running) ** 2)))
+
+    return BoostingDescentResponse(
+        rounds=list(range(len(residual_sums))),
+        residual_sums=residual_sums,
+    )

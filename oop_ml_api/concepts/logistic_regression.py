@@ -67,6 +67,8 @@ class LogisticFitResponse(BaseModel):
     boundary: float | None
     accuracy: float
     curve: list[CurvePoint]
+    gaps: list[float]
+    gap_total: float
 
 
 @router.post("/fit", response_model=LogisticFitResponse)
@@ -95,6 +97,14 @@ def fit(request: LogisticFitRequest) -> LogisticFitResponse:
         model.predict_probability([Feature("hours", grid)]), dtype=np.float64
     )
 
+    fitted_probabilities = np.asarray(
+        model.predict_probability([hours]), dtype=np.float64
+    )
+    gaps = [
+        float(point.label - probability)
+        for point, probability in zip(request.points, fitted_probabilities, strict=True)
+    ]
+
     return LogisticFitResponse(
         slope=slope,
         intercept=intercept,
@@ -104,4 +114,6 @@ def fit(request: LogisticFitRequest) -> LogisticFitResponse:
             CurvePoint(x=float(x), y=float(p))
             for x, p in zip(grid, probabilities, strict=True)
         ],
+        gaps=gaps,
+        gap_total=float(sum(gaps)),
     )

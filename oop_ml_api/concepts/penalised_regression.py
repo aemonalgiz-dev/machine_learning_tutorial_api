@@ -117,3 +117,75 @@ def fit(request: PenalisedFitRequest) -> PenalisedFitResponse:
             for x, y in zip(grid, curve_heights, strict=True)
         ],
     )
+
+
+PATH_SAMPLES = 51
+"""How many penalties the shrinkage path is traced at."""
+
+PATH_MAX_PENALTY = 500.0
+"""Where the traced path ends, far enough that lasso has reached zero."""
+
+LASSO_PATH_ITERATIONS = 100_000
+"""Sweep budget for each lasso fit on the path.
+
+The library's default budget is sized for the standardized degree-9 fit
+above; on the raw single-feature people the coordinate steps are tiny and
+the default stops early, reporting a slope well short of where the descent
+was heading. A deep budget and a tight tolerance let every fit actually
+arrive, which is what makes the path's exact zero at the soft-threshold
+penalty visible instead of smeared.
+"""
+
+LASSO_PATH_TOLERANCE = 1e-12
+"""Convergence tolerance for the path's lasso fits."""
+
+
+class ShrinkagePathRequest(BaseModel):
+    """The single-feature points whose two shrinkage paths are to be traced."""
+
+    points: list[Point] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+
+    model_config = {"extra": "forbid"}
+
+
+class ShrinkagePathResponse(BaseModel):
+    """One slope per penalty for each family, over the same penalties.
+
+    Ridge divides, so its slope shrinks toward zero and never lands on it.
+    Lasso subtracts, so its slope hits exactly zero at a finite penalty and
+    stays there.
+    """
+
+    penalties: list[float]
+    ridge_slopes: list[float]
+    lasso_slopes: list[float]
+
+
+@router.post("/shrinkage-path", response_model=ShrinkagePathResponse)
+def shrinkage_path(request: ShrinkagePathRequest) -> ShrinkagePathResponse:
+    """Fit ridge and lasso at each penalty and trace both slopes."""
+    input_feature = Feature("height", [point.x for point in request.points])
+    target = Feature("weight", [point.y for point in request.points])
+
+    penalties = [
+        float(value) for value in np.linspace(0.0, PATH_MAX_PENALTY, PATH_SAMPLES)
+    ]
+
+    ridge_slopes: list[float] = []
+    lasso_slopes: list[float] = []
+    for penalty in penalties:
+        ridge = RidgeRegression(penalty=penalty).fit([input_feature], target)
+        ridge_slopes.append(float(next(iter(ridge.coefficients)).value))
+
+        lasso = LassoRegression(
+            penalty=penalty,
+            max_iterations=LASSO_PATH_ITERATIONS,
+            tolerance=LASSO_PATH_TOLERANCE,
+        ).fit([input_feature], target)
+        lasso_slopes.append(float(next(iter(lasso.coefficients)).value))
+
+    return ShrinkagePathResponse(
+        penalties=penalties,
+        ridge_slopes=ridge_slopes,
+        lasso_slopes=lasso_slopes,
+    )

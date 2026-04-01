@@ -10,7 +10,7 @@ tree draws the axis-aligned boxes its questions carve the plane into.
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from oop_ml import DecisionTreeClassifier
+from oop_ml import DecisionTreeClassifier, FeatureSet, RowBlock
 from pydantic import BaseModel, Field
 
 from oop_ml_api.concepts.two_feature_classification import (
@@ -107,4 +107,64 @@ def fit(request: TreeFitRequest) -> TreeFitResponse:
         n_leaves=int(model.n_leaves),
         accuracy=float(model.score([heights, weights], target)),
         regions=region_grid(model, request.points),
+    )
+
+
+class RootCandidateDocument(BaseModel):
+    """One question the root considered, and what asking it was worth."""
+
+    feature: str
+    threshold: float
+    gain: float
+    admitted: bool
+
+
+class RootSearchResponse(BaseModel):
+    """Every candidate question the root scored, and the one that won.
+
+    The library's observed split search keeps all of its working, in scan
+    order, which is what lets the page draw the sweep instead of asserting
+    its outcome.
+    """
+
+    candidates: list[RootCandidateDocument]
+    best_feature: str
+    best_threshold: float
+    best_gain: float
+
+
+class RootSearchRequest(BaseModel):
+    """The people whose root question is to be searched for."""
+
+    points: list[LabelledPoint] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+
+    model_config = {"extra": "forbid"}
+
+
+@router.post("/root-candidates", response_model=RootSearchResponse)
+def root_candidates(request: RootSearchRequest) -> RootSearchResponse:
+    """Score every candidate first question and report the sweep."""
+    heights, weights, labels = features_of(request.points)
+
+    tree = DecisionTreeClassifier(max_depth=1).fit([heights, weights], labels)
+
+    block = RowBlock(
+        FeatureSet([heights, weights]).feature_matrix, ["height", "weight"]
+    )
+    search = tree.split_search(block, labels.column)
+
+    best = search.best
+    return RootSearchResponse(
+        candidates=[
+            RootCandidateDocument(
+                feature=candidate.split.feature_name,
+                threshold=float(candidate.split.threshold),
+                gain=float(candidate.split.gain),
+                admitted=candidate.was_admitted,
+            )
+            for candidate in search
+        ],
+        best_feature=best.feature_name,
+        best_threshold=float(best.threshold),
+        best_gain=float(best.gain),
     )

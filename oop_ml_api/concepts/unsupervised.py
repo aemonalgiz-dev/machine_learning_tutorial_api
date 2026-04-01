@@ -191,3 +191,117 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             for x, y in zip(rebuilt_x, rebuilt_y, strict=True)
         ],
     )
+
+
+MAX_ITERATION_SWEEP = 12
+"""How many loop passes the inertia staircase traces."""
+
+
+class InertiaCurveRequest(BaseModel):
+    """The people, and how many groups the walk is looking for."""
+
+    points: list[PlainPoint] = Field(min_length=2, max_length=MAX_POINTS)
+    n_clusters: int = Field(ge=1, le=MAX_CLUSTERS)
+
+    model_config = {"extra": "forbid"}
+
+
+class InertiaCurveResponse(BaseModel):
+    """The total the loop tracks, after each pass it was allowed.
+
+    Each entry refits the same seeded walk with the pass budget raised by
+    one, so the sequence is the single walk watched at every stage, and it
+    can only fall or hold still.
+    """
+
+    iterations: list[int]
+    inertias: list[float]
+
+
+@router.post("/concepts/k-means/inertia-curve", response_model=InertiaCurveResponse)
+def inertia_curve(request: InertiaCurveRequest) -> InertiaCurveResponse:
+    """Trace the inertia of the seeded walk, one pass budget at a time."""
+    heights = Feature("height", [point.x for point in request.points])
+    weights = Feature("weight", [point.y for point in request.points])
+
+    iterations = list(range(1, MAX_ITERATION_SWEEP + 1))
+    inertias: list[float] = []
+    for budget in iterations:
+        model = KMeans(
+            n_clusters=request.n_clusters,
+            n_initialisations=1,
+            random_seed=FIXED_SEED,
+            max_iterations=budget,
+        ).fit([heights, weights])
+        inertias.append(float(model.inertia))
+
+    return InertiaCurveResponse(iterations=iterations, inertias=inertias)
+
+
+SWEEP_DEGREES = 91
+"""The variance sweep samples the half-turn every two degrees."""
+
+
+class VarianceSweepRequest(BaseModel):
+    """The people whose cloud is to be measured in every direction."""
+
+    points: list[PlainPoint] = Field(min_length=2, max_length=MAX_POINTS)
+
+    model_config = {"extra": "forbid"}
+
+
+class SweepComponent(BaseModel):
+    """Where one of the cloud's own directions lands on the sweep."""
+
+    angle_degrees: float
+    variance: float
+
+
+class VarianceSweepResponse(BaseModel):
+    """The variance of the cloud along each direction of a half-turn.
+
+    The curve is built from the fitted components themselves: the variance
+    along a direction u is the sum over components of the component's
+    variance times the squared alignment of u with it, which is the
+    derivation's u'Cu with C written in its own eigenpairs. The peaks
+    therefore land exactly on the components the analyze endpoint reports.
+    """
+
+    angles_degrees: list[float]
+    variances: list[float]
+    components: list[SweepComponent]
+
+
+@router.post("/concepts/pca/variance-sweep", response_model=VarianceSweepResponse)
+def variance_sweep(request: VarianceSweepRequest) -> VarianceSweepResponse:
+    """Sweep a direction through half a turn and measure the variance along it."""
+    heights = Feature("height", [point.x for point in request.points])
+    weights = Feature("weight", [point.y for point in request.points])
+
+    fitted = PrincipalComponentAnalysis().fit([heights, weights])
+
+    directions = np.asarray(
+        [list(component.direction) for component in fitted.components],
+        dtype=np.float64,
+    )
+    variances = np.asarray(
+        [float(component.variance) for component in fitted.components],
+        dtype=np.float64,
+    )
+
+    angles = np.linspace(0.0, 180.0, SWEEP_DEGREES)
+    radians = np.deg2rad(angles)
+    sweep_directions = np.stack([np.cos(radians), np.sin(radians)], axis=1)
+    alignments = sweep_directions @ directions.T
+    swept = (alignments**2) @ variances
+
+    components = []
+    for direction, variance in zip(directions, variances, strict=True):
+        angle = float(np.degrees(np.arctan2(direction[1], direction[0]))) % 180.0
+        components.append(SweepComponent(angle_degrees=angle, variance=float(variance)))
+
+    return VarianceSweepResponse(
+        angles_degrees=[float(value) for value in angles],
+        variances=[float(value) for value in swept],
+        components=components,
+    )

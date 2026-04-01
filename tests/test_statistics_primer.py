@@ -119,3 +119,29 @@ class TestSample:
         response = client.post(SAMPLE, json={"draw": 101, "seed": 1})
 
         assert response.status_code == 422
+
+
+class TestDescribeValues:
+    """The mean-to-spread walk the balance widget draws."""
+
+    def test_the_primers_worked_heights_come_back_exactly(self) -> None:
+        response = client.post(
+            "/primers/statistics/describe-values",
+            json={"values": [160.0, 165.0, 170.0, 175.0, 180.0]},
+        )
+
+        body = response.json()
+        assert body["mean"] == 170.0
+        assert body["deviations"] == [-10.0, -5.0, 0.0, 5.0, 10.0]
+        assert body["deviation_total"] == 0.0
+        assert body["squared_deviations"] == [100.0, 25.0, 0.0, 25.0, 100.0]
+        assert body["variance"] == 50.0
+        assert round(body["standard_deviation"], 4) == 7.0711
+
+    def test_the_deviations_always_cancel(self) -> None:
+        response = client.post(
+            "/primers/statistics/describe-values",
+            json={"values": [3.0, 7.0, 8.0, 12.0, 40.0]},
+        )
+
+        assert abs(response.json()["deviation_total"]) < 1e-9
