@@ -18,6 +18,7 @@ truth -- the library -- authoritative, and keeps the frontend a view.
 
 from __future__ import annotations
 
+import numpy as np
 from fastapi import APIRouter
 from oop_ml import Feature, SimpleLinearRegression
 from pydantic import BaseModel, Field
@@ -102,4 +103,79 @@ def fit(request: FitRequest) -> FitResponse:
             y_end=model.slope * x_end + model.intercept,
         ),
         residuals=residuals,
+    )
+
+
+SURFACE_STEPS = 21
+"""The loss surface is sampled on a lattice this many settings per side."""
+
+
+class LossSurfaceRequest(BaseModel):
+    """The points whose residual sum of squares is to be drawn as a surface."""
+
+    points: list[Point] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+
+    model_config = {"extra": "forbid"}
+
+
+class LossMinimum(BaseModel):
+    """Where the library's fit says the bowl bottoms out."""
+
+    slope: float
+    intercept: float
+    rss: float
+
+
+class LossSurfaceResponse(BaseModel):
+    """The bowl the derivation talks about, sampled around its floor.
+
+    ``rss`` is row-major over intercepts then slopes, so ``rss[i][j]`` is the
+    residual sum of squares at ``intercepts[i]`` and ``slopes[j]``.
+    """
+
+    slopes: list[float]
+    intercepts: list[float]
+    rss: list[list[float]]
+    minimum: LossMinimum
+
+
+@router.post("/loss-surface", response_model=LossSurfaceResponse)
+def loss_surface(request: LossSurfaceRequest) -> LossSurfaceResponse:
+    """Sample RSS over a window of slopes and intercepts around the best fit.
+
+    The best pair comes from the library's own fit, and the window is centred
+    on it, wide enough in the intercept that the bowl's diagonal valley, a
+    larger slope partly repaid by a smaller intercept, shows itself.
+    """
+    x_values = np.asarray([point.x for point in request.points], dtype=np.float64)
+    y_values = np.asarray([point.y for point in request.points], dtype=np.float64)
+
+    model = SimpleLinearRegression().fit(Feature("x", x_values), Feature("y", y_values))
+    best_slope = float(model.slope)
+    best_intercept = float(model.intercept)
+
+    slope_span = max(0.5, abs(best_slope))
+    intercept_span = max(10.0, slope_span * float(np.mean(np.abs(x_values))))
+
+    slopes = np.linspace(
+        best_slope - slope_span, best_slope + slope_span, SURFACE_STEPS
+    )
+    intercepts = np.linspace(
+        best_intercept - intercept_span,
+        best_intercept + intercept_span,
+        SURFACE_STEPS,
+    )
+
+    predictions = (
+        slopes[None, :, None] * x_values[None, None, :] + intercepts[:, None, None]
+    )
+    rss = np.sum((y_values[None, None, :] - predictions) ** 2, axis=2)
+
+    best_rss = float(np.sum((y_values - (best_slope * x_values + best_intercept)) ** 2))
+
+    return LossSurfaceResponse(
+        slopes=[float(value) for value in slopes],
+        intercepts=[float(value) for value in intercepts],
+        rss=[[float(value) for value in row] for row in rss],
+        minimum=LossMinimum(slope=best_slope, intercept=best_intercept, rss=best_rss),
     )

@@ -117,3 +117,75 @@ def fit(request: PolynomialFitRequest) -> PolynomialFitResponse:
             for x, y in zip(grid, curve_heights, strict=True)
         ],
     )
+
+
+PLANE_STEPS = 7
+"""The fitted plane is sampled on a lattice this many values per side."""
+
+
+class Person3d(BaseModel):
+    """One person with two inputs and the weight the plane predicts from them."""
+
+    height: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+    age: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+    weight: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+
+
+class PlaneFitRequest(BaseModel):
+    """The people to fit the plane through."""
+
+    people: list[Person3d] = Field(min_length=3, max_length=MAX_POINTS)
+
+    model_config = {"extra": "forbid"}
+
+
+class PlaneFitResponse(BaseModel):
+    """The fitted plane, its numbers, and a lattice of its surface to draw.
+
+    ``surface`` is row-major over ages then heights, each entry the plane's
+    predicted weight at that lattice corner.
+    """
+
+    height_coefficient: float
+    age_coefficient: float
+    intercept: float
+    r_squared: float
+    heights_axis: list[float]
+    ages_axis: list[float]
+    surface: list[list[float]]
+
+
+@router.post("/fit-plane", response_model=PlaneFitResponse)
+def fit_plane(request: PlaneFitRequest) -> PlaneFitResponse:
+    """Fit weight from height and age together, and sample the plane."""
+    heights = Feature("height", [person.height for person in request.people])
+    ages = Feature("age", [person.age for person in request.people])
+    weights = Feature("weight", [person.weight for person in request.people])
+
+    model = MultipleLinearRegression().fit([heights, ages], weights)
+    named = {
+        coefficient.name: float(coefficient.value) for coefficient in model.coefficients
+    }
+
+    heights_axis = np.linspace(min(heights.values), max(heights.values), PLANE_STEPS)
+    ages_axis = np.linspace(min(ages.values), max(ages.values), PLANE_STEPS)
+    lattice_h, lattice_a = np.meshgrid(heights_axis, ages_axis)
+    surface = np.asarray(
+        model.predict(
+            [
+                Feature("height", lattice_h.ravel()),
+                Feature("age", lattice_a.ravel()),
+            ]
+        ),
+        dtype=np.float64,
+    ).reshape(PLANE_STEPS, PLANE_STEPS)
+
+    return PlaneFitResponse(
+        height_coefficient=named["height"],
+        age_coefficient=named["age"],
+        intercept=float(model.intercept),
+        r_squared=float(model.score([heights, ages], weights)),
+        heights_axis=[float(value) for value in heights_axis],
+        ages_axis=[float(value) for value in ages_axis],
+        surface=[[float(value) for value in row] for row in surface],
+    )

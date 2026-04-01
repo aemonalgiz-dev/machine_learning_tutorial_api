@@ -19,6 +19,7 @@ from fastapi import APIRouter
 from oop_ml import (
     Feature,
     LinearKernel,
+    LogisticRegression,
     PolynomialKernel,
     RadialBasisKernel,
     Standardizer,
@@ -80,6 +81,88 @@ def classify(request: KernelRequest) -> KernelResponse:
     return KernelResponse(
         accuracy=float(model.score(standardized, labels)),
         regions=_regions(model, standardizer, request.points),
+    )
+
+
+class LiftedPoint(BaseModel):
+    """One patient carried through the worked mapping, with their label."""
+
+    u: float
+    v: float
+    w: float
+    label: int
+
+
+class SeparatingPlane(BaseModel):
+    """The flat boundary found in the lifted space, a·u + b·v + c·w = d."""
+
+    a: float
+    b: float
+    c: float
+    d: float
+
+
+class LiftResponse(BaseModel):
+    """The clinic lifted into three dimensions, and the plane that cuts it."""
+
+    points: list[LiftedPoint]
+    plane: SeparatingPlane
+    accuracy: float
+
+
+@router.post("/lift", response_model=LiftResponse)
+def lift(request: KernelRequest) -> LiftResponse:
+    """Carry the patients through the worked φ and find the flat boundary.
+
+    The mapping is the page's worked one, squared and crossed terms of the
+    standardized vitals, and the boundary comes from fitting the library's
+    logistic regression on the three lifted columns, whose coefficients and
+    intercept are exactly a plane. The plane is returned with its normal
+    scaled to unit length so it draws the same at any fit steepness. The
+    ``kernel`` field of the request is ignored here, since the lift exists to
+    show what the squared kernel implies.
+    """
+    temperature = Feature("temperature", [point.x for point in request.points])
+    heart_rate = Feature("heart_rate", [point.y for point in request.points])
+
+    standardizer = Standardizer().fit([temperature, heart_rate])
+    standardized = standardizer.transform([temperature, heart_rate])
+    first = np.asarray(standardized[0].values, dtype=np.float64)
+    second = np.asarray(standardized[1].values, dtype=np.float64)
+
+    u_values = first**2
+    v_values = np.sqrt(2.0) * first * second
+    w_values = second**2
+
+    lifted = [
+        Feature("u", u_values),
+        Feature("v", v_values),
+        Feature("w", w_values),
+    ]
+    labels = Feature("healthy", [float(point.label) for point in request.points])
+    boundary = LogisticRegression().fit(lifted, labels)
+
+    named = {
+        coefficient.name: float(coefficient.value)
+        for coefficient in boundary.coefficients
+    }
+    normal = np.array([named["u"], named["v"], named["w"]], dtype=np.float64)
+    length = float(np.linalg.norm(normal)) or 1.0
+
+    return LiftResponse(
+        points=[
+            LiftedPoint(u=float(u), v=float(v), w=float(w), label=point.label)
+            for u, v, w, point in zip(
+                u_values, v_values, w_values, request.points, strict=True
+            )
+        ],
+        plane=SeparatingPlane(
+            a=float(normal[0] / length),
+            b=float(normal[1] / length),
+            c=float(normal[2] / length),
+            d=float(-boundary.intercept / length),
+        ),
+        accuracy=float(boundary.score(lifted, labels)),
     )
 
 
