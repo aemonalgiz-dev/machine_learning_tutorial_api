@@ -35,10 +35,22 @@ class Outcome(BaseModel):
     label: int = Field(ge=0, le=1)
 
 
+MAX_LEARNING_RATE = 50.0
+"""The hottest climb the widget may ask for, hot enough to destabilise."""
+
+
 class LogisticFitRequest(BaseModel):
-    """The observed outcomes to fit the curve through."""
+    """The observed outcomes to fit the curve through, and how boldly to climb.
+
+    The learning rate is exposed so the page can show the climb overshooting.
+    A logistic gradient is bounded, so the weights never overflow to
+    non-finite the way least squares can, though at a hot rate each stride
+    flies past the top, the slope balloons with the epochs instead of
+    settling, and the boundary wanders.
+    """
 
     points: list[Outcome] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+    learning_rate: float = Field(default=0.1, gt=0.0, le=MAX_LEARNING_RATE)
 
     model_config = {"extra": "forbid"}
 
@@ -67,7 +79,7 @@ def fit(request: LogisticFitRequest) -> LogisticFitResponse:
     hours = Feature("hours", [point.x for point in request.points])
     passed = Feature("passed", [float(point.label) for point in request.points])
 
-    model = LogisticRegression().fit([hours], passed)
+    model = LogisticRegression(learning_rate=request.learning_rate).fit([hours], passed)
     slope = float(next(iter(model.coefficients)).value)
     intercept = float(model.intercept)
 

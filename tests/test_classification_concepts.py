@@ -73,6 +73,26 @@ class TestLogistic:
         assert all(0.0 <= value <= 1.0 for value in heights)
         assert heights[0] < 0.1 and heights[-1] > 0.9
 
+    def test_a_hot_climb_balloons_the_slope(self) -> None:
+        # The gradient is bounded, so nothing overflows, though at a hot rate
+        # the strides fly past the top and the slope grows with the epochs
+        # instead of settling.
+        calm = client.post(
+            LOGISTIC, json={"points": OUTCOMES, "learning_rate": 0.1}
+        ).json()
+        hot = client.post(
+            LOGISTIC, json={"points": OUTCOMES, "learning_rate": 40.0}
+        ).json()
+
+        assert hot["slope"] > 10 * calm["slope"]
+
+    def test_a_rate_past_the_cap_is_refused(self) -> None:
+        response = client.post(
+            LOGISTIC, json={"points": OUTCOMES, "learning_rate": 51.0}
+        )
+
+        assert response.status_code == 422
+
     def test_a_single_class_is_refused(self) -> None:
         response = client.post(
             LOGISTIC,

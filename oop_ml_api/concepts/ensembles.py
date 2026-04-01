@@ -13,7 +13,7 @@ members, so a reader can watch the fit assemble round by round.
 from __future__ import annotations
 
 import numpy as np
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from oop_ml import (
     BaggingClassifier,
     Feature,
@@ -110,11 +110,16 @@ def random_forest(request: CommitteeRequest) -> CommitteeResponse:
 
 
 class BoostingRequest(BaseModel):
-    """The points, how many rounds to run, and how bold each round is."""
+    """The points, how many rounds to run, and how bold each round is.
+
+    The rate is accepted up to 2 so the widget's slider can cross 1 and meet
+    the refusal below, though the library itself will not construct a model
+    past 1.
+    """
 
     points: list[Point] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
     rounds: int = Field(ge=1, le=MAX_ROUNDS)
-    learning_rate: float = Field(gt=0.0, le=1.0)
+    learning_rate: float = Field(gt=0.0, le=2.0)
 
     model_config = {"extra": "forbid"}
 
@@ -132,8 +137,22 @@ def gradient_boosting(request: BoostingRequest) -> BoostingResponse:
     """Fit stump-by-stump for the requested number of rounds.
 
     The members are depth-one stumps, the smallest tree there is, so the
-    assembly is visible, each round adding one shelf to the curve.
+    assembly is visible, each round adding one shelf to the curve. A rate past
+    1 is refused in words rather than passed to the library, whose constructor
+    would reject it anyway, since past 1 each round's correction overshoots
+    the very mistake it just fitted, and past 2 the leftover errors grow every
+    round instead of shrinking.
     """
+    if request.learning_rate > 1.0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "past a learning rate of 1 each round's correction overshoots "
+                "the very mistake it just fitted, so the fit gets worse round "
+                "by round, and the library refuses to build such a model"
+            ),
+        )
+
     x_values = [point.x for point in request.points]
     y_values = [point.y for point in request.points]
     inputs = Feature("t", x_values)

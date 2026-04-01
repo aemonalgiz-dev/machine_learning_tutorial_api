@@ -129,6 +129,15 @@ class TestGradientBoosting:
         assert many["r_squared"] > few["r_squared"]
         assert many["r_squared"] > 0.95
 
+    def test_a_rate_past_one_is_refused_in_words(self) -> None:
+        response = client.post(
+            BOOSTING,
+            json={"points": THREE_POINTS, "rounds": 5, "learning_rate": 1.5},
+        )
+
+        assert response.status_code == 422
+        assert "overshoots" in response.json()["detail"]
+
     def test_a_round_count_past_the_cap_is_refused(self) -> None:
         response = client.post(
             BOOSTING,
