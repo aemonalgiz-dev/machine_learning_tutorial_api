@@ -22,6 +22,7 @@ from oop_ml import (
     LogisticRegression,
     PolynomialKernel,
     RadialBasisKernel,
+    RowBlock,
     Standardizer,
     SupportVectorClassifier,
 )
@@ -200,4 +201,72 @@ def _regions(
         y_max=float(y_max),
         cells=GRID_CELLS,
         labels=[[int(value) for value in row] for row in predictions],
+    )
+
+
+SIMILARITY_SAMPLES = 161
+"""How many positions the similarity curves are sampled at."""
+
+SIMILARITY_REFERENCE = 1.5
+"""Where the reference point stands on the one-dimensional axis."""
+
+SIMILARITY_SPAN = 4.0
+"""The sweep runs from minus this to this."""
+
+SIMILARITY_KERNELS = (
+    LinearKernel(),
+    PolynomialKernel(degree=POLYNOMIAL_DEGREE),
+    RadialBasisKernel(gamma=0.5),
+    RadialBasisKernel(gamma=2.0),
+)
+"""The kernels the chart compares, two widths of radial so gamma is visible."""
+
+
+class SimilarityCurve(BaseModel):
+    """One kernel's answer at every swept position, labelled by its own formula."""
+
+    label: str
+    values: list[float]
+
+
+class SimilarityCurveResponse(BaseModel):
+    """Each kernel's similarity to one fixed reference point, swept along a line.
+
+    The labels are the library kernels' own descriptions, so the chart cannot
+    drift from what the code actually computes.
+    """
+
+    positions: list[float]
+    reference: float
+    curves: list[SimilarityCurve]
+
+
+@router.post("/similarity-curve", response_model=SimilarityCurveResponse)
+def similarity_curve() -> SimilarityCurveResponse:
+    """Sweep a point along a line and ask each kernel how alike the pair is.
+
+    No request body, since the sweep is a fixed illustration rather than a
+    fit, the same standing as the ensemble pages' formula curves.
+    """
+    positions = np.linspace(-SIMILARITY_SPAN, SIMILARITY_SPAN, SIMILARITY_SAMPLES)
+    swept = RowBlock(positions.reshape(-1, 1), ["x"])
+    reference = RowBlock(np.asarray([[SIMILARITY_REFERENCE]], dtype=np.float64), ["x"])
+
+    curves = [
+        SimilarityCurve(
+            label=kernel.description,
+            values=[
+                float(value)
+                for value in np.asarray(
+                    kernel.between(swept, reference), dtype=np.float64
+                ).ravel()
+            ],
+        )
+        for kernel in SIMILARITY_KERNELS
+    ]
+
+    return SimilarityCurveResponse(
+        positions=[float(value) for value in positions],
+        reference=SIMILARITY_REFERENCE,
+        curves=curves,
     )
