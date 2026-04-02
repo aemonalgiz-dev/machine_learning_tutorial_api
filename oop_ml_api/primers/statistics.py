@@ -140,6 +140,22 @@ class HistogramBin(BaseModel):
     count: int
 
 
+BELL_SAMPLES = 97
+"""How many points the bell curve is sampled at across the histogram."""
+
+
+class BellPoint(BaseModel):
+    """One point of the true bell, scaled to the people drawn so far.
+
+    ``expected_count`` is the density times the sample size times the bin
+    width, so the curve sits on the same axis as the histogram's counts and
+    shows the shape the bars are settling toward.
+    """
+
+    x: float
+    expected_count: float
+
+
 class SampleResponse(BaseModel):
     """The extended draws, their summary, and the histogram to draw."""
 
@@ -148,6 +164,7 @@ class SampleResponse(BaseModel):
     mean: float
     standard_deviation: float
     bins: list[HistogramBin]
+    bell: list[BellPoint]
     true_mean: float
     true_standard_deviation: float
 
@@ -179,12 +196,23 @@ def sample(request: SampleRequest) -> SampleResponse:
         for index in range(BIN_COUNT)
     ]
 
+    grid = np.linspace(BIN_START, BIN_START + BIN_WIDTH * BIN_COUNT, BELL_SAMPLES)
+    standardized = (grid - TRUE_MEAN) / TRUE_STANDARD_DEVIATION
+    density = np.exp(-0.5 * standardized**2) / (
+        TRUE_STANDARD_DEVIATION * np.sqrt(2.0 * np.pi)
+    )
+    expected_counts = density * values.size * BIN_WIDTH
+
     return SampleResponse(
         values=[float(value) for value in values],
         count=int(values.size),
         mean=float(np.mean(values)),
         standard_deviation=float(np.std(values)),
         bins=bins,
+        bell=[
+            BellPoint(x=float(x), expected_count=float(expected))
+            for x, expected in zip(grid, expected_counts, strict=True)
+        ],
         true_mean=TRUE_MEAN,
         true_standard_deviation=TRUE_STANDARD_DEVIATION,
     )

@@ -145,3 +145,39 @@ class TestDescribeValues:
         )
 
         assert abs(response.json()["deviation_total"]) < 1e-9
+
+
+class TestBellCurve:
+    """The true bell returned with every draw, scaled to the sample size."""
+
+    def test_the_peak_sits_at_the_true_mean(self) -> None:
+        response = client.post(
+            "/primers/statistics/sample",
+            json={"values": [], "draw": 100, "seed": 7},
+        )
+
+        bell = response.json()["bell"]
+        peak = max(bell, key=lambda point: point["expected_count"])
+        assert abs(peak["x"] - 170.0) < 0.5
+
+    def test_the_curve_is_scaled_to_the_head_count(self) -> None:
+        response = client.post(
+            "/primers/statistics/sample",
+            json={"values": [], "draw": 100, "seed": 7},
+        )
+
+        body = response.json()
+        peak = max(point["expected_count"] for point in body["bell"])
+        expected_peak = body["count"] * 2.0 / (7.0 * (2.0 * 3.141592653589793) ** 0.5)
+        assert abs(peak - expected_peak) < 0.01
+
+    def test_the_bell_is_symmetric_about_the_mean(self) -> None:
+        response = client.post(
+            "/primers/statistics/sample",
+            json={"values": [], "draw": 10, "seed": 3},
+        )
+
+        bell = response.json()["bell"]
+        by_x = {round(point["x"], 3): point["expected_count"] for point in bell}
+        for offset in (2.0, 6.0, 14.0):
+            assert abs(by_x[170.0 - offset] - by_x[170.0 + offset]) < 1e-9
