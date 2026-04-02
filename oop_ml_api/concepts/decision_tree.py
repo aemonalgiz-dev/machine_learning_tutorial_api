@@ -9,6 +9,9 @@ tree draws the axis-aligned boxes its questions carve the plane into.
 
 from __future__ import annotations
 
+from typing import Literal
+
+import numpy as np
 from fastapi import APIRouter, HTTPException
 from oop_ml import DecisionTreeClassifier, FeatureSet, RowBlock
 from pydantic import BaseModel, Field
@@ -19,7 +22,7 @@ from oop_ml_api.concepts.two_feature_classification import (
     features_of,
     region_grid,
 )
-from oop_ml_api.limits import MAX_POINTS, MIN_POINTS
+from oop_ml_api.limits import MAX_MAGNITUDE, MAX_POINTS, MIN_POINTS
 
 router = APIRouter(prefix="/concepts/decision-trees", tags=["decision-trees"])
 
@@ -167,4 +170,136 @@ def root_candidates(request: RootSearchRequest) -> RootSearchResponse:
         best_feature=best.feature_name,
         best_threshold=float(best.threshold),
         best_gain=float(best.gain),
+    )
+
+
+MAX_WALK_DEPTH = 3
+"""The deepest tree the walking widget may grow.
+
+Deliberately shallower than the fitting endpoint's cap. The walk exists to
+be read node by node, and a tree past three questions stops fitting in one
+look, which is the one job this endpoint has.
+"""
+
+
+class WalkVisitor(BaseModel):
+    """The person to send down the tree, height then weight."""
+
+    x: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+    y: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+
+
+class TreeWalkRequest(BaseModel):
+    """The crowd to grow the tree from, how deep, and who walks it."""
+
+    points: list[LabelledPoint] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+    max_depth: int = Field(ge=1, le=MAX_WALK_DEPTH)
+    visitor: WalkVisitor
+
+    model_config = {"extra": "forbid"}
+
+
+class WalkNodeDocument(BaseModel):
+    """One node of the walkable tree, carrying an id the path can point at."""
+
+    id: int
+    kind: Literal["question", "answer"]
+    samples: int
+    feature: str | None = None
+    threshold: float | None = None
+    label: int | None = None
+    left: WalkNodeDocument | None = None
+    right: WalkNodeDocument | None = None
+
+
+class WalkStep(BaseModel):
+    """One question asked on the way down, and which way the visitor went."""
+
+    node_id: int
+    feature: str
+    threshold: float
+    value: float
+    direction: Literal["left", "right"]
+
+
+class TreeWalkResponse(BaseModel):
+    """The tree, the route one visitor took through it, and where they landed."""
+
+    tree: WalkNodeDocument
+    steps: list[WalkStep]
+    leaf_id: int
+    prediction: int
+
+
+def _document_with_ids(node, identities: dict[int, int], counter: list[int]):
+    """Walk the fitted tree into a document, remembering each node's id."""
+    assigned = counter[0]
+    counter[0] += 1
+    identities[id(node)] = assigned
+
+    if hasattr(node, "split"):
+        return WalkNodeDocument(
+            id=assigned,
+            kind="question",
+            samples=int(node.n_samples),
+            feature=node.split.feature_name,
+            threshold=float(node.split.threshold),
+            left=_document_with_ids(node.left, identities, counter),
+            right=_document_with_ids(node.right, identities, counter),
+        )
+    return WalkNodeDocument(
+        id=assigned,
+        kind="answer",
+        samples=int(node.n_samples),
+        label=int(node.prediction),
+    )
+
+
+@router.post("/walk", response_model=TreeWalkResponse)
+def walk(request: TreeWalkRequest) -> TreeWalkResponse:
+    """Grow a small tree and route one visitor through it, step by step.
+
+    The routing is the library's own ``Split.sends_left`` at every node, the
+    same rule ``predict`` applies in bulk, so the recorded path cannot
+    disagree with the model's answer, and a test asserts the landing leaf's
+    label is the prediction.
+    """
+    heights, weights, labels = features_of(request.points)
+    tree = DecisionTreeClassifier(max_depth=request.max_depth).fit(
+        [heights, weights], labels
+    )
+
+    identities: dict[int, int] = {}
+    document = _document_with_ids(tree.root, identities, [0])
+
+    visitor_block = RowBlock(
+        np.asarray([[request.visitor.x, request.visitor.y]], dtype=np.float64),
+        ["height", "weight"],
+    )
+
+    steps: list[WalkStep] = []
+    node = tree.root
+    while hasattr(node, "split"):
+        goes_left = bool(node.split.sends_left(visitor_block)[0])
+        observed = (
+            request.visitor.x
+            if node.split.feature_name == "height"
+            else request.visitor.y
+        )
+        steps.append(
+            WalkStep(
+                node_id=identities[id(node)],
+                feature=node.split.feature_name,
+                threshold=float(node.split.threshold),
+                value=float(observed),
+                direction="left" if goes_left else "right",
+            )
+        )
+        node = node.left if goes_left else node.right
+
+    return TreeWalkResponse(
+        tree=document,
+        steps=steps,
+        leaf_id=identities[id(node)],
+        prediction=int(node.prediction),
     )

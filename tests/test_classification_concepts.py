@@ -233,3 +233,86 @@ class TestRootCandidates:
     def test_both_features_were_scanned(self) -> None:
         features = {candidate["feature"] for candidate in self.search()["candidates"]}
         assert features == {"height", "weight"}
+
+
+class TestTreeWalk:
+    """One visitor routed down the small three-leaf tree, pinned end to end."""
+
+    THREE_LEAF_CROWD: ClassVar[list[dict]] = [
+        {"x": 118.0, "y": 24.0, "label": 0},
+        {"x": 122.0, "y": 28.0, "label": 0},
+        {"x": 120.0, "y": 25.0, "label": 0},
+        {"x": 132.0, "y": 32.0, "label": 0},
+        {"x": 128.0, "y": 30.0, "label": 0},
+        {"x": 135.0, "y": 34.0, "label": 0},
+        {"x": 146.0, "y": 59.0, "label": 0},
+        {"x": 140.0, "y": 63.0, "label": 0},
+        {"x": 148.0, "y": 67.0, "label": 0},
+        {"x": 161.0, "y": 42.0, "label": 0},
+        {"x": 168.0, "y": 45.0, "label": 0},
+        {"x": 159.0, "y": 57.0, "label": 1},
+        {"x": 162.0, "y": 61.0, "label": 1},
+        {"x": 178.0, "y": 66.0, "label": 1},
+        {"x": 180.0, "y": 78.0, "label": 1},
+        {"x": 183.0, "y": 83.0, "label": 1},
+    ]
+
+    def walk(self, height: float, weight: float) -> dict:
+        response = client.post(
+            "/concepts/decision-trees/walk",
+            json={
+                "points": self.THREE_LEAF_CROWD,
+                "max_depth": 2,
+                "visitor": {"x": height, "y": weight},
+            },
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_the_tree_is_the_three_leaf_shape(self) -> None:
+        body = self.walk(125.0, 30.0)
+        root = body["tree"]
+        assert root["feature"] == "height"
+        assert root["threshold"] == 153.5
+        assert root["left"]["kind"] == "answer"
+        assert root["left"]["samples"] == 9
+        assert root["right"]["feature"] == "weight"
+        assert root["right"]["threshold"] == 51.0
+
+    def test_a_stocky_child_is_never_asked_about_weight(self) -> None:
+        body = self.walk(147.0, 62.0)
+        assert len(body["steps"]) == 1
+        assert body["steps"][0]["feature"] == "height"
+        assert body["steps"][0]["direction"] == "left"
+        assert body["prediction"] == 0
+
+    def test_a_slender_teenager_needs_both_questions(self) -> None:
+        body = self.walk(166.0, 46.0)
+        directions = [(step["feature"], step["direction"]) for step in body["steps"]]
+        assert directions == [("height", "right"), ("weight", "left")]
+        assert body["prediction"] == 0
+
+    def test_an_adult_goes_right_twice(self) -> None:
+        body = self.walk(180.0, 74.0)
+        directions = [(step["feature"], step["direction"]) for step in body["steps"]]
+        assert directions == [("height", "right"), ("weight", "right")]
+        assert body["prediction"] == 1
+
+    def test_the_landing_leaf_carries_the_prediction(self) -> None:
+        body = self.walk(166.0, 46.0)
+
+        def find(node: dict, wanted: int) -> dict | None:
+            if node["id"] == wanted:
+                return node
+            for side in ("left", "right"):
+                child = node[side]
+                if child is not None:
+                    found = find(child, wanted)
+                    if found is not None:
+                        return found
+            return None
+
+        leaf = find(body["tree"], body["leaf_id"])
+        assert leaf is not None
+        assert leaf["kind"] == "answer"
+        assert leaf["label"] == body["prediction"]
