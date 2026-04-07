@@ -15,14 +15,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from oop_ml_api.concepts import (
     decision_tree,
+    distance_metrics,
     ensembles,
     evaluation,
     feature_scaling,
+    gradient_descent_regression,
     hebbian_principal_components,
     hopfield_network,
     k_nearest,
+    kernel_pca,
+    kernel_ridge,
     kernel_trick,
     logistic_regression,
+    multiclass_classification,
     normalisation_layers,
     penalised_regression,
     polynomial_regression,
@@ -51,6 +56,11 @@ CONCEPT_ROUTERS = (
     restricted_boltzmann_machine.router,
     self_organising_map.router,
     hebbian_principal_components.router,
+    gradient_descent_regression.router,
+    multiclass_classification.router,
+    distance_metrics.router,
+    kernel_ridge.router,
+    kernel_pca.router,
 )
 """Every concept the API serves. Adding one is appending its router here."""
 
