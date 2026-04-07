@@ -18,12 +18,16 @@ from oop_ml_api.concepts import (
     ensembles,
     evaluation,
     feature_scaling,
+    hebbian_principal_components,
+    hopfield_network,
     k_nearest,
     kernel_trick,
     logistic_regression,
     normalisation_layers,
     penalised_regression,
     polynomial_regression,
+    restricted_boltzmann_machine,
+    self_organising_map,
     simple_linear_regression,
     unsupervised,
 )
@@ -43,6 +47,10 @@ CONCEPT_ROUTERS = (
     evaluation.router,
     feature_scaling.router,
     normalisation_layers.router,
+    hopfield_network.router,
+    restricted_boltzmann_machine.router,
+    self_organising_map.router,
+    hebbian_principal_components.router,
 )
 """Every concept the API serves. Adding one is appending its router here."""
 
