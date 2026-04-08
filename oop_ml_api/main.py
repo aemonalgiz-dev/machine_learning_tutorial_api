@@ -14,8 +14,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from oop_ml_api.concepts import (
+    backpropagation,
+    convolution,
     decision_tree,
+    dense_layers,
     distance_metrics,
+    dropout,
     ensembles,
     evaluation,
     feature_scaling,
@@ -27,13 +31,18 @@ from oop_ml_api.concepts import (
     kernel_ridge,
     kernel_trick,
     logistic_regression,
+    loss_functions,
     multiclass_classification,
+    neurons,
     normalisation_layers,
     penalised_regression,
     polynomial_regression,
+    pooling,
     restricted_boltzmann_machine,
     self_organising_map,
+    shapes,
     simple_linear_regression,
+    training_a_network,
     unsupervised,
 )
 from oop_ml_api.errors import install_error_handling
@@ -61,6 +70,15 @@ CONCEPT_ROUTERS = (
     distance_metrics.router,
     kernel_ridge.router,
     kernel_pca.router,
+    neurons.router,
+    dense_layers.router,
+    loss_functions.router,
+    backpropagation.router,
+    convolution.router,
+    pooling.router,
+    shapes.router,
+    dropout.router,
+    training_a_network.router,
 )
 """Every concept the API serves. Adding one is appending its router here."""
 
