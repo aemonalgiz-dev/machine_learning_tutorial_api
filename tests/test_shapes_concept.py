@@ -432,10 +432,13 @@ class TestRefusals:
 
         assert response.status_code == 422
 
-    def test_an_empty_stack_is_refused(self) -> None:
-        response = client.post(CHECK, json={"layers": []})
+    def test_an_empty_stack_is_refused_in_the_library_words(self) -> None:
+        body = check([])
 
-        assert response.status_code == 422
+        assert body["holds"] is False
+        assert body["layers"] == []
+        assert body["joins"] == []
+        assert body["refusal"] == "a stack needs at least one layer"
 
     def test_too_many_layers_are_refused(self) -> None:
         response = client.post(CHECK, json={"layers": [FLATTEN] * 9})

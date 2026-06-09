@@ -494,3 +494,149 @@ class TestRefusals:
         )
 
         assert response.status_code == 422
+
+
+CANDIDATE = "/concepts/gradient-descent-regression/candidate"
+SURFACE = "/concepts/gradient-descent-regression/loss-surface"
+
+
+class TestCandidate:
+    def test_the_flat_line_at_zero_reads_the_whole_number_gradient(self) -> None:
+        body = client.post(
+            CANDIDATE,
+            json={
+                "points": WORKED_THREE,
+                "level": 0,
+                "slope": 0,
+                "learning_rate": 0.02,
+            },
+        ).json()
+
+        assert abs(body["gradient_level"] + 132) < 1e-9
+        assert abs(body["gradient_slope"] + 20) < 1e-9
+        assert abs(body["standing"]["loss"] - 4364) < 1e-9
+        assert abs(body["next_position"]["level"] - 2.64) < 1e-9
+        assert abs(body["next_position"]["slope"] - 0.4) < 1e-9
+
+    def test_the_person_at_the_mean_height_adds_nothing_to_the_slope(self) -> None:
+        body = client.post(
+            CANDIDATE,
+            json={
+                "points": WORKED_THREE,
+                "level": 0,
+                "slope": 0,
+                "learning_rate": 0.02,
+            },
+        ).json()
+
+        middle = next(
+            each for each in body["observations"] if each["centred_height"] == 0
+        )
+        assert middle["slope_share"] == 0
+        assert middle["level_share"] != 0
+        assert (
+            abs(
+                sum(each["level_share"] for each in body["observations"])
+                - body["gradient_level"]
+            )
+            < 1e-9
+        )
+
+    def test_the_gradient_vanishes_at_the_closed_form(self) -> None:
+        body = client.post(
+            CANDIDATE,
+            json={
+                "points": WORKED_THREE,
+                "level": 66,
+                "slope": 0.6,
+                "learning_rate": 0.02,
+            },
+        ).json()
+
+        assert abs(body["gradient_level"]) < 1e-9
+        assert abs(body["gradient_slope"]) < 1e-9
+        assert abs(body["standing"]["loss"] - 2.0) < 1e-9
+
+    def test_the_slices_pass_through_the_standing_loss(self) -> None:
+        body = client.post(
+            CANDIDATE,
+            json={
+                "points": WORKED_THREE,
+                "level": 10,
+                "slope": 0.2,
+                "learning_rate": 0.02,
+            },
+        ).json()
+
+        middle = len(body["level_slice"]["axis"]) // 2
+        assert abs(body["level_slice"]["axis"][middle] - 10) < 1e-9
+        assert (
+            abs(body["level_slice"]["losses"][middle] - body["standing"]["loss"]) < 1e-9
+        )
+        assert (
+            abs(body["slope_slice"]["losses"][middle] - body["standing"]["loss"]) < 1e-9
+        )
+
+
+class TestLossSurface:
+    def test_centred_curvatures_are_the_worked_pair(self) -> None:
+        body = client.post(
+            SURFACE,
+            json={
+                "points": WORKED_THREE,
+                "parameterisation": "centred",
+                "learning_rate": 0.02,
+                "max_epochs": 500,
+            },
+        ).json()
+
+        assert abs(body["smallest_curvature"] - 2) < 1e-9
+        assert abs(body["largest_curvature"] - 100 / 3) < 1e-9
+        assert abs(body["divergence_threshold"] - 0.06) < 1e-9
+        assert abs(body["optimum"]["first"] - 66) < 1e-9
+        assert abs(body["optimum"]["second"] - 0.6) < 1e-9
+        assert body["outcome"] == "converged"
+
+    def test_raw_heights_are_a_far_narrower_valley(self) -> None:
+        body = client.post(
+            SURFACE,
+            json={
+                "points": WORKED_THREE,
+                "parameterisation": "raw",
+                "learning_rate": 0.02,
+                "max_epochs": 500,
+            },
+        ).json()
+
+        assert body["condition_number"] > 1e7
+        assert body["divergence_threshold"] < 1e-4
+        assert body["outcome"] == "diverged"
+        assert abs(body["optimum"]["first"] + 36) < 1e-6
+
+    def test_scaling_rounds_the_bowl(self) -> None:
+        body = client.post(
+            SURFACE,
+            json={
+                "points": WORKED_THREE,
+                "parameterisation": "scaled",
+                "learning_rate": 0.02,
+                "max_epochs": 500,
+            },
+        ).json()
+
+        assert body["condition_number"] < 2
+
+    def test_the_lattice_is_lowest_at_the_optimum(self) -> None:
+        body = client.post(
+            SURFACE,
+            json={
+                "points": WORKED_THREE,
+                "parameterisation": "centred",
+                "learning_rate": 0.02,
+                "max_epochs": 50,
+            },
+        ).json()
+
+        lowest = min(min(row) for row in body["losses"])
+        assert lowest >= body["optimum"]["loss"] - 1e-9
+        assert len(body["walk"]) == 51

@@ -47,6 +47,37 @@ Why the dense layer's weights are zeros
 Nothing here reads a weight. A dense layer's shape is its neuron count over
 its neurons' width, both settled before any weight is, so the neurons hold
 zeros and the layer is built only to be asked its shape and to be stacked.
+
+The four endpoints beside the stack check
+------------------------------------------
+The stack check answers what a whole chain does. Three questions the page also
+asks are narrower than a chain, and one is about what a layer does to numbers
+rather than to arrangements.
+
+``/concepts/shapes/extents`` builds a bare ``LayerShape`` and reports its two
+sides and their counts, or the library's refusal. It is the one endpoint that
+can be handed an extent of zero or a side with no extents at all, because a
+layer constructor would never get that far.
+
+``/concepts/shapes/join`` asks the library's own join predicate about two
+arrangements, and then asks a stack of two layers so the refusal is the
+library's words rather than this module's. A layer answering an arbitrary
+arrangement has to be synthesised: a row of ``n`` is what a flattening layer of
+``(n,)`` answers with, and a picture ``(c, h, w)`` is what a convolution of
+``c`` kernels of one by one over a picture ``(1, h, w)`` answers with. Two
+extents have no such layer, and are refused here in this module's words.
+
+``/concepts/shapes/tied-weights`` is the weakness the library records rather
+than defends. A stack steps by rebuilding each position from that position's
+gradient, so one layer object placed twice comes back as two layers with
+different weights after a single step. This endpoint builds exactly that stack
+and reports both positions' weights afterwards.
+
+``/concepts/shapes/whole-numbers`` is the other recorded weakness. Every block
+a layer reads is coerced to float64 and scanned for non-finite entries, so a
+value meant as an index is never checked for being whole or for being in range,
+and two whole numbers too large for float64 to tell apart arrive as one. The
+endpoint hands a flattening layer a row of numbers and reports what comes back.
 """
 
 from __future__ import annotations
@@ -61,13 +92,16 @@ from oop_ml import (
     Conv2d,
     DenseLayer,
     Flatten,
+    FloatArray,
     Identity,
     Layer,
+    LayerShape,
     LayerStack,
     MaxPool2d,
     MLLibError,
     Neuron,
     RectifiedLinear,
+    SquaredError,
 )
 from pydantic import BaseModel, Field
 
@@ -168,9 +202,14 @@ LayerSpec = Annotated[
 
 
 class CheckRequest(BaseModel):
-    """The layers, in order, from the input end."""
+    """The layers, in order, from the input end.
 
-    layers: list[LayerSpec] = Field(min_length=1, max_length=MAX_LAYERS)
+    An empty list is allowed through rather than bounded away, so that the page
+    can quote the library's own words for a stack with nothing in it instead of
+    this module's.
+    """
+
+    layers: list[LayerSpec] = Field(min_length=0, max_length=MAX_LAYERS)
 
     model_config = {"extra": "forbid"}
 
@@ -232,6 +271,16 @@ def check(request: CheckRequest) -> CheckResponse:
     layer is looked at, so the first thing wrong is met first and is the only
     thing that gets a message.
     """
+    if not request.layers:
+        return CheckResponse(
+            layers=[],
+            joins=[],
+            holds=False,
+            reads=None,
+            answers=None,
+            refusal=_stack_refusal([]),
+        )
+
     if request.layers[0].reads is None:
         raise HTTPException(
             status_code=422,
@@ -439,3 +488,413 @@ def _stack_refusal(layers: list[Layer]) -> str | None:
         return str(error)
 
     return None
+
+
+MAX_SIDE_EXTENTS = 4
+"""The most extents one side of a stated shape may carry. Three is a picture,
+one is a row, and the fourth is there so a reader can overshoot and still be
+answered rather than bounded away."""
+
+MIN_STATED_EXTENT = -8
+"""How far below one a stated extent may go. The library refuses anything under
+one in its own words, and this is far enough for the page to hear it say so
+about zero and about a negative."""
+
+MAX_TIED_WIDTH = 6
+"""The widest square dense layer the weight-tying probe may build. Square,
+because the layer stands at two positions of one chain and so must read exactly
+what it answers with."""
+
+MAX_TIED_ROWS = 8
+"""The most rows one step of the weight-tying probe may be handed."""
+
+MAX_TIED_MAGNITUDE = 100.0
+"""How large any weight, bias, input or target in that probe may be."""
+
+MAX_PROBED_NUMBERS = 8
+"""The most numbers one coercion probe may hand a layer."""
+
+MAX_WHOLE_NUMBER = 2**60
+"""The largest whole number the coercion probe accepts.
+
+Well past the 2 to the 53 where float64 stops being able to tell consecutive
+whole numbers apart, which is what the probe is for, and well short of anything
+that would make the arithmetic slow."""
+
+MAX_FRACTIONAL_MAGNITUDE = 1_000_000.0
+"""How large a fractional value handed to that probe may be."""
+
+StatedExtent = Annotated[int, Field(ge=MIN_STATED_EXTENT, le=MAX_WIDTH)]
+JoinExtent = Annotated[int, Field(ge=1, le=MAX_WIDTH)]
+TiedValue = Annotated[float, Field(ge=-MAX_TIED_MAGNITUDE, le=MAX_TIED_MAGNITUDE)]
+WholeNumber = Annotated[int, Field(ge=-MAX_WHOLE_NUMBER, le=MAX_WHOLE_NUMBER)]
+FractionalValue = Annotated[
+    float, Field(ge=-MAX_FRACTIONAL_MAGNITUDE, le=MAX_FRACTIONAL_MAGNITUDE)
+]
+
+
+class ExtentsRequest(BaseModel):
+    """Two sides of a shape, stated as extents and nothing else.
+
+    Both sides may be empty and both may carry an extent below one, because
+    those are two of the refusals the page wants in the library's own words and
+    no layer constructor would let a request reach them.
+    """
+
+    reads: list[StatedExtent] = Field(min_length=0, max_length=MAX_SIDE_EXTENTS)
+    answers: list[StatedExtent] = Field(min_length=0, max_length=MAX_SIDE_EXTENTS)
+
+    model_config = {"extra": "forbid"}
+
+
+class ExtentsResponse(BaseModel):
+    """What the shape holds, or why the library would not build it.
+
+    ``n_reads`` and ``n_answers`` are the products of the extents, which is how
+    many numbers one input and one output hold. They are the fact the page
+    keeps apart from the arrangement, and they are absent when the shape was
+    refused.
+    """
+
+    reads: list[int] | None
+    answers: list[int] | None
+    n_reads: int | None
+    n_answers: int | None
+    refusal: str | None
+
+
+class JoinRequest(BaseModel):
+    """One seam, stated as the arrangement each side of it carries.
+
+    ``beneath`` is what the lower layer answers with and ``above`` is what the
+    upper layer reads. One extent is a row and three are a picture. Two are
+    refused, because no layer here answers with a two-extent arrangement and
+    the seam has to be built out of layers for the refusal to be the
+    library's.
+    """
+
+    beneath: list[JoinExtent] = Field(min_length=1, max_length=3)
+    above: list[JoinExtent] = Field(min_length=1, max_length=3)
+
+    model_config = {"extra": "forbid"}
+
+
+class JoinResponse(BaseModel):
+    """The verdict, both counts, and the library's words when it refuses.
+
+    ``counts_agree`` is reported beside ``holds`` rather than folded into it,
+    because the pair of them is the page's subject. A seam where the counts
+    agree and the verdict is still false is the case the whole check exists
+    for.
+    """
+
+    beneath: list[int]
+    above: list[int]
+    n_beneath: int
+    n_above: int
+    counts_agree: bool
+    holds: bool
+    refusal: str | None
+
+
+class TiedWeightsRequest(BaseModel):
+    """One square dense layer, placed at two positions of one chain.
+
+    The weights are square so the layer reads exactly what it answers with,
+    which is what lets one object occupy both positions. The rows and targets
+    are one step's worth of data, and the step is taken once.
+    """
+
+    weights: list[list[TiedValue]] = Field(min_length=1, max_length=MAX_TIED_WIDTH)
+    biases: list[TiedValue] = Field(min_length=1, max_length=MAX_TIED_WIDTH)
+    rows: list[list[TiedValue]] = Field(min_length=1, max_length=MAX_TIED_ROWS)
+    targets: list[list[TiedValue]] = Field(min_length=1, max_length=MAX_TIED_ROWS)
+    learning_rate: float = Field(default=0.1, gt=0.0, le=10.0)
+
+    model_config = {"extra": "forbid"}
+
+
+class TiedWeightsResponse(BaseModel):
+    """What one shared layer looked like before the step and after it.
+
+    ``same_object_before`` and ``same_object_after`` are identity rather than
+    equality. The chain really does hold one object at both positions going in,
+    and the question is whether it still does coming out.
+    """
+
+    width: int
+    loss: float
+    same_object_before: bool
+    same_object_after: bool
+    weights_before: list[list[float]]
+    first_after: list[list[float]]
+    second_after: list[list[float]]
+    largest_gap: float
+
+
+class NumberReport(BaseModel):
+    """One number as it was asked for and as the layer answered with it.
+
+    Both are written as decimal strings. A whole number past 2 to the 53 cannot
+    survive a browser's own numbers either, so text is the only way the page can
+    show two of them apart.
+    """
+
+    asked: str
+    answered: str
+    unchanged: bool
+    whole: bool
+
+
+class WholeNumberRequest(BaseModel):
+    """Numbers to hand a layer, in two groups that go wrong differently.
+
+    ``whole_numbers`` are exact integers on the way in, so anything lost is
+    lost by the coercion rather than by the request. ``fractional_values`` are
+    what an index is not, and are handed over to see whether anything objects.
+    """
+
+    whole_numbers: list[WholeNumber] = Field(
+        min_length=1, max_length=MAX_PROBED_NUMBERS
+    )
+    fractional_values: list[FractionalValue] = Field(
+        default_factory=list, max_length=MAX_PROBED_NUMBERS
+    )
+
+    model_config = {"extra": "forbid"}
+
+
+class WholeNumberResponse(BaseModel):
+    """What came back, and how many distinct values are left.
+
+    ``n_distinct_after`` against ``n_whole_asked`` is the measurement, since two
+    whole numbers the request tells apart may be two the layer cannot.
+    """
+
+    whole_numbers: list[NumberReport]
+    fractional_values: list[NumberReport]
+    n_whole_asked: int
+    n_distinct_after: int
+    refusal: str | None
+
+
+@router.post("/concepts/shapes/extents", response_model=ExtentsResponse)
+def extents(request: ExtentsRequest) -> ExtentsResponse:
+    """Build a bare shape and report its sides, or the library's refusal."""
+    try:
+        shape = LayerShape(n_inputs=request.reads, n_outputs=request.answers)
+    except MLLibError as error:
+        return ExtentsResponse(
+            reads=None, answers=None, n_reads=None, n_answers=None, refusal=str(error)
+        )
+
+    return ExtentsResponse(
+        reads=list(shape.reads),
+        answers=list(shape.answers),
+        n_reads=shape.n_inputs,
+        n_answers=shape.n_outputs,
+        refusal=None,
+    )
+
+
+@router.post("/concepts/shapes/join", response_model=JoinResponse)
+def join(request: JoinRequest) -> JoinResponse:
+    """Ask the library whether one arrangement may follow another.
+
+    The verdict is the shape's own predicate. The refusal is a stack of the two
+    synthesised layers, so the words are the ones a reader would meet building
+    the same seam out of layers they chose themselves.
+    """
+    beneath = _layer_answering(request.beneath)
+    above = Flatten(reads=request.above)
+
+    return JoinResponse(
+        beneath=list(beneath.shape.answers),
+        above=list(above.shape.reads),
+        n_beneath=beneath.shape.n_outputs,
+        n_above=above.shape.n_inputs,
+        counts_agree=beneath.shape.n_outputs == above.shape.n_inputs,
+        holds=above.shape.follows(beneath.shape),
+        refusal=_stack_refusal([beneath, above]),
+    )
+
+
+@router.post("/concepts/shapes/tied-weights", response_model=TiedWeightsResponse)
+def tied_weights(request: TiedWeightsRequest) -> TiedWeightsResponse:
+    """Step a chain holding one layer twice, and report both positions after.
+
+    The chain is built, run forward, scored, walked back and stepped once, all
+    through the library. Nothing here compares the two positions until the
+    library has handed back the stepped chain.
+    """
+    width = len(request.weights)
+    if len(request.biases) != width:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"a layer of {width} neurons carries {width} biases, got "
+                f"{len(request.biases)}"
+            ),
+        )
+    if any(len(row) != width for row in request.weights):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "this layer stands at two positions of one chain, so it reads "
+                f"exactly what it answers with and its weights are {width} by "
+                f"{width}"
+            ),
+        )
+    if len(request.rows) != len(request.targets):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"one target per row, got {len(request.rows)} rows and "
+                f"{len(request.targets)} targets"
+            ),
+        )
+    if any(len(row) != width for row in [*request.rows, *request.targets]):
+        raise HTTPException(
+            status_code=422,
+            detail=f"every row and every target holds {width} numbers",
+        )
+
+    shared = DenseLayer(
+        [
+            Neuron(weights=weights, bias=bias, activation=Identity())
+            for weights, bias in zip(request.weights, request.biases, strict=True)
+        ]
+    )
+    chain = LayerStack([shared, shared])
+
+    backward = chain.backward_pass(
+        np.array(request.rows, dtype=np.float64),
+        np.array(request.targets, dtype=np.float64),
+        SquaredError(),
+    )
+    stepped = chain.stepped_by(backward, request.learning_rate)
+
+    first = stepped[0]
+    second = stepped[1]
+    assert isinstance(first, DenseLayer)
+    assert isinstance(second, DenseLayer)
+
+    return TiedWeightsResponse(
+        width=width,
+        loss=float(backward.loss),
+        same_object_before=chain[0] is chain[1],
+        same_object_after=first is second,
+        weights_before=_as_rows(shared.weight_matrix),
+        first_after=_as_rows(first.weight_matrix),
+        second_after=_as_rows(second.weight_matrix),
+        largest_gap=float(np.max(np.abs(first.weight_matrix - second.weight_matrix))),
+    )
+
+
+@router.post("/concepts/shapes/whole-numbers", response_model=WholeNumberResponse)
+def whole_numbers(request: WholeNumberRequest) -> WholeNumberResponse:
+    """Hand a layer a row of numbers and report what it answers with.
+
+    A flattening layer over a row changes nothing about the numbers, so
+    whatever differs between what was asked for and what came back was done by
+    the coercion at the layer's own boundary and by nothing else.
+    """
+    whole = _through_a_layer([float(value) for value in request.whole_numbers])
+    fractional = _through_a_layer(list(request.fractional_values))
+
+    return WholeNumberResponse(
+        whole_numbers=[
+            _number_report(str(asked), answered)
+            for asked, answered in zip(request.whole_numbers, whole, strict=True)
+        ],
+        fractional_values=[
+            _number_report(_decimal(asked), answered)
+            for asked, answered in zip(
+                request.fractional_values, fractional, strict=True
+            )
+        ],
+        n_whole_asked=len(set(request.whole_numbers)),
+        n_distinct_after=len(set(whole)),
+        refusal=None,
+    )
+
+
+def _layer_answering(arrangement: list[int]) -> Layer:
+    """A layer whose answers are exactly this arrangement.
+
+    A row of ``n`` is what a flattening layer of ``(n,)`` answers with. A
+    picture ``(c, h, w)`` is what a convolution of ``c`` kernels of one by one
+    over a picture ``(1, h, w)`` answers with, since a window of one at stride
+    one reaches every position and leaves both sides the length they were.
+    """
+    if len(arrangement) == 2:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "a seam here is stated as a row of numbers or as a picture of "
+                "channels, height and width, and no layer answers with two "
+                "extents"
+            ),
+        )
+
+    if len(arrangement) == 1:
+        return Flatten(reads=arrangement)
+
+    channels, height, width = arrangement
+    if channels > MAX_FILTERS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"a picture here carries at most {MAX_FILTERS} channels, got {channels}"
+            ),
+        )
+    if height > MAX_EXTENT or width > MAX_EXTENT:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"a picture here is at most {MAX_EXTENT} by {MAX_EXTENT}, got "
+                f"{height} by {width}"
+            ),
+        )
+
+    return Conv2d(
+        reads=(1, height, width),
+        n_filters=channels,
+        kernel_size=1,
+        activation=Identity(),
+        stride=1,
+        padding=0,
+    )
+
+
+def _through_a_layer(values: list[float]) -> list[float]:
+    """One row pushed through a flattening layer, which changes no number."""
+    if not values:
+        return []
+
+    layer = Flatten(reads=len(values))
+    response = layer.respond_to(np.array([values], dtype=np.float64))
+    return [float(value) for value in response.outputs[0]]
+
+
+def _decimal(value: float) -> str:
+    """A float as the shortest decimal text that means it.
+
+    A whole number loses its trailing zero, so that a number asked for as an
+    integer and answered with unchanged reads the same on both sides and the
+    ones that did change are the only ones that differ.
+    """
+    return str(int(value)) if value.is_integer() else repr(value)
+
+
+def _number_report(asked: str, answered: float) -> NumberReport:
+    """One number as asked for and as answered with, and what survived."""
+    text = _decimal(answered)
+    return NumberReport(
+        asked=asked, answered=text, unchanged=text == asked, whole=answered.is_integer()
+    )
+
+
+def _as_rows(block: FloatArray) -> list[list[float]]:
+    """A weight matrix as plain rows of Python floats."""
+    return [[float(value) for value in row] for row in block]

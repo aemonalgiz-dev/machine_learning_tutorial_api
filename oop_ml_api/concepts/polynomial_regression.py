@@ -42,10 +42,18 @@ class Point(BaseModel):
 
 
 class PolynomialFitRequest(BaseModel):
-    """The points and the degree of the curve to bend through them."""
+    """The points and the degree of the curve to bend through them.
+
+    ``curve_from`` and ``curve_to`` widen the interval the fitted curve is
+    sampled over. Left unset, the curve spans the data and no further, which
+    is the honest default; set, the page can show what a high degree does
+    beyond the last measurement, which is the extrapolation section's point.
+    """
 
     points: list[Point] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
     degree: int = Field(ge=1, le=MAX_DEGREE)
+    curve_from: float | None = Field(default=None, ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+    curve_to: float | None = Field(default=None, ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
 
     model_config = {"extra": "forbid"}
 
@@ -65,11 +73,19 @@ class CurvePoint(BaseModel):
 
 
 class PolynomialFitResponse(BaseModel):
-    """The fitted polynomial, named, scored and sampled for drawing."""
+    """The fitted polynomial, named, scored and sampled for drawing.
+
+    ``fitted`` and ``residuals`` are one entry per request point, in the
+    request's order, so a residual plot can put each miss under the
+    measurement that produced it.
+    """
 
     coefficients: list[NamedCoefficient]
     intercept: float
     r_squared: float
+    residual_sum_of_squares: float
+    fitted: list[float]
+    residuals: list[float]
     curve: list[CurvePoint]
 
 
@@ -100,8 +116,16 @@ def fit(request: PolynomialFitRequest) -> PolynomialFitResponse:
     terms = polynomial.transform([input_feature])
 
     model = MultipleLinearRegression().fit(terms, target)
+    evaluation = model.evaluate(terms, target)
 
-    grid = np.linspace(min(x_values), max(x_values), CURVE_SAMPLES)
+    curve_from = min(x_values) if request.curve_from is None else request.curve_from
+    curve_to = max(x_values) if request.curve_to is None else request.curve_to
+    if curve_to <= curve_from:
+        raise HTTPException(
+            status_code=422,
+            detail="the curve has to be sampled from a smaller time to a larger one",
+        )
+    grid = np.linspace(curve_from, curve_to, CURVE_SAMPLES)
     grid_terms = polynomial.transform([Feature("t", grid)])
     curve_heights = np.asarray(model.predict(grid_terms), dtype=np.float64)
 
@@ -111,7 +135,10 @@ def fit(request: PolynomialFitRequest) -> PolynomialFitResponse:
             for coefficient in model.coefficients
         ],
         intercept=float(model.intercept),
-        r_squared=float(model.score(terms, target)),
+        r_squared=float(evaluation.r2_score),
+        residual_sum_of_squares=float(evaluation.residual_sum_of_squares),
+        fitted=[float(value) for value in evaluation.predicted_values],
+        residuals=[float(value) for value in evaluation.residuals],
         curve=[
             CurvePoint(x=float(x), y=float(y))
             for x, y in zip(grid, curve_heights, strict=True)
@@ -143,13 +170,16 @@ class PlaneFitResponse(BaseModel):
     """The fitted plane, its numbers, and a lattice of its surface to draw.
 
     ``surface`` is row-major over ages then heights, each entry the plane's
-    predicted weight at that lattice corner.
+    predicted weight at that lattice corner. ``fitted`` is the plane's
+    predicted weight for each requested person, in the request's order, so a
+    residual can be drawn as a drop from the person to the plane.
     """
 
     height_coefficient: float
     age_coefficient: float
     intercept: float
     r_squared: float
+    fitted: list[float]
     heights_axis: list[float]
     ages_axis: list[float]
     surface: list[list[float]]
@@ -185,6 +215,10 @@ def fit_plane(request: PlaneFitRequest) -> PlaneFitResponse:
         age_coefficient=named["age"],
         intercept=float(model.intercept),
         r_squared=float(model.score([heights, ages], weights)),
+        fitted=[
+            float(value)
+            for value in np.asarray(model.predict([heights, ages]), dtype=np.float64)
+        ],
         heights_axis=[float(value) for value in heights_axis],
         ages_axis=[float(value) for value in ages_axis],
         surface=[[float(value) for value in row] for row in surface],

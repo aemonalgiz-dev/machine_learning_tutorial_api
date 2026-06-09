@@ -71,6 +71,47 @@ class TestPolynomial:
         assert body["curve"][0]["x"] == 0.0
         assert body["curve"][-1]["x"] == 4.0
 
+    def test_the_exact_ball_leaves_no_residual_at_degree_two(self) -> None:
+        body = client.post(POLYNOMIAL, json={"points": BALL, "degree": 2}).json()
+
+        assert len(body["fitted"]) == len(BALL)
+        assert all(abs(value) < 1e-9 for value in body["residuals"])
+        assert abs(body["residual_sum_of_squares"]) < 1e-12
+
+    def test_residuals_are_the_target_less_the_fitted_value(self) -> None:
+        body = client.post(POLYNOMIAL, json={"points": NOISY_BALL, "degree": 1}).json()
+
+        for point, fitted, residual in zip(
+            NOISY_BALL, body["fitted"], body["residuals"], strict=True
+        ):
+            assert abs(point["y"] - fitted - residual) < 1e-12
+        assert (
+            abs(
+                body["residual_sum_of_squares"]
+                - sum(residual**2 for residual in body["residuals"])
+            )
+            < 1e-9
+        )
+
+    def test_the_curve_can_be_sampled_beyond_the_data(self) -> None:
+        body = client.post(
+            POLYNOMIAL,
+            json={"points": BALL, "degree": 2, "curve_from": -2, "curve_to": 8},
+        ).json()
+
+        assert body["curve"][0]["x"] == -2
+        assert body["curve"][-1]["x"] == 8
+        # h = 20t - 4.9t^2 at t = 8 is 160 - 313.6.
+        assert abs(body["curve"][-1]["y"] + 153.6) < 1e-9
+
+    def test_a_backwards_curve_range_is_refused(self) -> None:
+        response = client.post(
+            POLYNOMIAL,
+            json={"points": BALL, "degree": 2, "curve_from": 4, "curve_to": 0},
+        )
+
+        assert response.status_code == 422
+
     def test_too_few_points_for_the_degree_is_refused_in_words(self) -> None:
         response = client.post(POLYNOMIAL, json={"points": BALL, "degree": 5})
 

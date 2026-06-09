@@ -1,6 +1,6 @@
 """What near means, for the distance-metrics page.
 
-Three endpoints, each thin over ``DistanceMetric``, the library's closed enum
+Seven endpoints, each thin over ``DistanceMetric``, the library's closed enum
 pairing six names with the objects that compute them.
 
 The unit-circle endpoint hands a metric a lattice of cells and one centre, asks
@@ -17,23 +17,43 @@ same crowd and the same query can be watched consulting different people, and
 under cosine reaching a different answer. The between endpoint measures one
 pair under all six at once and shows the working a hand calculation passes
 through, together with the p-norm of the same gap at a sweep of orders, which
-is the derivation's picture of Manhattan sliding into Chebyshev.
+is the derivation's picture of Manhattan sliding into Chebyshev, and the three
+routes to one Euclidean answer, of which only the library's survives a pair
+far from the origin.
 
-There is no seed anywhere in this module. Nothing on the page is random.
+The axioms endpoint takes three people and reports, under every metric, the
+four checks a distance has to pass, so the page can show cosine failing the
+triangle inequality on three people of one height rather than asserting it.
+The units endpoint refits the crowd with weight in grams and again
+standardised, which is the measurement behind the advice to scale first. The
+models endpoint fits the density clusterer under every metric and works the
+mean-against-median arithmetic that explains why k-means takes none. The
+dimensions endpoint draws uniform rows in a rising number of features and
+measures how much further the farthest row is than the nearest, which is the
+curse of dimensionality as a number rather than a warning.
+
+The dimensions endpoint is the only seeded thing here, and its seed is a
+request field with a fixed default, so the page can quote what it shows.
 """
 
 from __future__ import annotations
 
+from functools import cache
+
 import numpy as np
 from fastapi import APIRouter
 from oop_ml import (
+    DBSCAN,
+    AgglomerativeClustering,
     DistanceMetric,
     Feature,
     KNearestNeighboursClassifier,
+    Linkage,
     MinkowskiDistance,
     RowBlock,
+    Standardizer,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from oop_ml_api.concepts.k_nearest import MAX_K, ChosenNeighbour
 from oop_ml_api.concepts.two_feature_classification import (
@@ -75,6 +95,14 @@ sometimes out, and the diamond grows notches that are facts about rounding
 rather than about the metric.
 """
 
+TRIANGLE_TOLERANCE = 1e-12
+"""How far below the direct distance a two-leg route may fall and still pass.
+
+Three people in one line make the two legs sum to the direct distance exactly
+under every p-norm, and a sum of two floats can land an ulp under the third.
+Without the allowance a genuine equality reads as a violation.
+"""
+
 LATTICE_FEATURE_NAMES = ("horizontal", "vertical")
 """What the lattice's two columns are called. The shapes are abstract."""
 
@@ -83,6 +111,21 @@ PAIR_FEATURE_NAMES = ("height", "weight")
 
 MINKOWSKI_ORDERS: tuple[float, ...] = (1.0, 1.5, 2.0, 4.0, 10.0, np.inf)
 """The orders the between endpoint sweeps, Manhattan through to Chebyshev."""
+
+MAX_ORDER = 100.0
+"""The largest p-norm order a request may ask for by itself."""
+
+MAX_WEIGHT_FACTOR = 10_000.0
+"""How far a request may rescale the weight column. A thousand is grams."""
+
+MAX_DIMENSION_POINTS = 300
+"""The most uniform rows the dimensions endpoint will draw per dimension."""
+
+DIMENSIONS: tuple[int, ...] = (1, 2, 5, 10, 50, 200)
+"""The feature counts the dimensions endpoint measures, the library's own."""
+
+MAX_RADIUS = 1_000_000.0
+"""The largest density radius a request may ask for."""
 
 
 class LatticeCentre(BaseModel):
@@ -208,6 +251,39 @@ class MetricNeighboursResponse(BaseModel):
     regions: RegionGrid
 
 
+def _ranking(
+    model: KNearestNeighboursClassifier,
+    query_features: list[Feature],
+    labels: list[int],
+) -> tuple[list[ChosenNeighbour], list[RankedPerson]]:
+    """The k who voted and the whole crowd ranked, from the observed route."""
+    chosen: list[ChosenNeighbour] = []
+    ranked: list[RankedPerson] = []
+    for query in model.neighbour_search(query_features):
+        chosen_positions = {int(index) for index in query.chosen_indices}
+        for index, distance in zip(
+            query.chosen_indices, query.chosen_distances, strict=True
+        ):
+            chosen.append(
+                ChosenNeighbour(
+                    index=int(index),
+                    distance=float(distance),
+                    label=labels[int(index)],
+                )
+            )
+        for index in np.argsort(query.distances, kind="stable"):
+            ranked.append(
+                RankedPerson(
+                    index=int(index),
+                    distance=float(query.distances[index]),
+                    label=labels[int(index)],
+                    chosen=int(index) in chosen_positions,
+                )
+            )
+
+    return chosen, ranked
+
+
 @router.post("/neighbours", response_model=MetricNeighboursResponse)
 def neighbours(request: MetricNeighboursRequest) -> MetricNeighboursResponse:
     """Fit on the stored people under the chosen metric and consult the k nearest.
@@ -226,31 +302,9 @@ def neighbours(request: MetricNeighboursRequest) -> MetricNeighboursResponse:
     ]
 
     prediction = int(np.asarray(model.predict(query_features), dtype=np.float64)[0])
-
-    chosen: list[ChosenNeighbour] = []
-    ranked: list[RankedPerson] = []
-    for query in model.neighbour_search(query_features):
-        chosen_positions = {int(index) for index in query.chosen_indices}
-        for index, distance in zip(
-            query.chosen_indices, query.chosen_distances, strict=True
-        ):
-            chosen.append(
-                ChosenNeighbour(
-                    index=int(index),
-                    distance=float(distance),
-                    label=request.points[int(index)].label,
-                )
-            )
-        for index in np.argsort(query.distances, kind="stable"):
-            ranked.append(
-                RankedPerson(
-                    index=int(index),
-                    distance=float(query.distances[index]),
-                    label=request.points[int(index)].label,
-                    chosen=int(index) in chosen_positions,
-                )
-            )
-
+    chosen, ranked = _ranking(
+        model, query_features, [point.label for point in request.points]
+    )
     votes_for_one = sum(1 for neighbour in chosen if neighbour.label == 1)
 
     return MetricNeighboursResponse(
@@ -265,10 +319,17 @@ def neighbours(request: MetricNeighboursRequest) -> MetricNeighboursResponse:
 
 
 class PairRequest(BaseModel):
-    """Two people, to be measured under every metric at once."""
+    """Two people, to be measured under every metric at once.
+
+    ``order`` asks for one more p-norm beside the fixed sweep. It is bounded
+    below by zero and not by one, on purpose: an order below one is accepted
+    by the library and is not a metric, and the page shows that rather than
+    hiding it.
+    """
 
     first: PlainPoint
     second: PlainPoint
+    order: float | None = Field(default=None, gt=0.0, le=MAX_ORDER)
 
     model_config = {"extra": "forbid"}
 
@@ -317,28 +378,59 @@ class OrderedNorm(BaseModel):
     distance: float
 
 
+class EuclideanRoutes(BaseModel):
+    """Three ways to the one Euclidean number, and where they part.
+
+    ``direct`` squares the gaps, sums and roots, which is the definition.
+    ``expanded_raw`` opens the square into ``|a|^2 - 2 a.b + |b|^2`` on the
+    coordinates as given, which is the matrix-multiply form the library uses
+    for speed, and it loses the answer when both people sit far from the
+    origin, because it recovers a small number as the difference of two large
+    ones. ``library`` is the same expansion after both rows are shifted by the
+    remembered rows' mean, which is what the library actually computes. The
+    first two are definitions worked here; the third is the library's.
+    """
+
+    direct: float
+    expanded_raw: float
+    library: float
+
+
 class PairResponse(BaseModel):
     """The six distances between the pair, the working, and the p-norm sweep."""
 
     distances: SixDistances
     working: PairWorking
     orders: list[OrderedNorm]
+    at_order: float | None
+    euclidean_routes: EuclideanRoutes
+
+
+def _blocks(first: PlainPoint, second: PlainPoint) -> tuple[RowBlock, RowBlock]:
+    """Two one-row blocks under the pair's feature names."""
+    first_row = np.array([[first.x, first.y]], dtype=np.float64)
+    second_row = np.array([[second.x, second.y]], dtype=np.float64)
+    return (
+        RowBlock(first_row, PAIR_FEATURE_NAMES),
+        RowBlock(second_row, PAIR_FEATURE_NAMES),
+    )
+
+
+def _six(first: RowBlock, second: RowBlock) -> SixDistances:
+    """The first row against the second under every named metric."""
+    return SixDistances(
+        **{
+            metric.value: float(metric.between(first, second)[0, 0])
+            for metric in DistanceMetric
+        }
+    )
 
 
 @router.post("/between", response_model=PairResponse)
 def between(request: PairRequest) -> PairResponse:
     """Measure one pair under all six metrics, with the working shown."""
-    first_row = np.array([[request.first.x, request.first.y]], dtype=np.float64)
-    second_row = np.array([[request.second.x, request.second.y]], dtype=np.float64)
-    first_block = RowBlock(first_row, PAIR_FEATURE_NAMES)
-    second_block = RowBlock(second_row, PAIR_FEATURE_NAMES)
-
-    distances = SixDistances(
-        **{
-            metric.value: float(metric.between(first_block, second_block)[0, 0])
-            for metric in DistanceMetric
-        }
-    )
+    first_block, second_block = _blocks(request.first, request.second)
+    distances = _six(first_block, second_block)
 
     orders = [
         OrderedNorm(
@@ -349,9 +441,16 @@ def between(request: PairRequest) -> PairResponse:
         )
         for order in MINKOWSKI_ORDERS
     ]
+    at_order = (
+        None
+        if request.order is None
+        else float(
+            MinkowskiDistance(request.order).between(first_block, second_block)[0, 0]
+        )
+    )
 
-    first_values = first_row[0]
-    second_values = second_row[0]
+    first_values = first_block.values[0]
+    second_values = second_block.values[0]
     gap = first_values - second_values
     first_length = float(np.sqrt(first_values @ first_values))
     second_length = float(np.sqrt(second_values @ second_values))
@@ -377,4 +476,479 @@ def between(request: PairRequest) -> PairResponse:
         feature_count=int(first_values.size),
     )
 
-    return PairResponse(distances=distances, working=working, orders=orders)
+    expanded_raw = float(
+        np.sqrt(max(0.0, first_length**2 - 2.0 * dot_product + second_length**2))
+    )
+    euclidean_routes = EuclideanRoutes(
+        direct=float(np.sqrt(gap @ gap)),
+        expanded_raw=expanded_raw,
+        library=distances.euclidean,
+    )
+
+    return PairResponse(
+        distances=distances,
+        working=working,
+        orders=orders,
+        at_order=at_order,
+        euclidean_routes=euclidean_routes,
+    )
+
+
+class TripleRequest(BaseModel):
+    """Three people, for the four checks a distance has to pass.
+
+    The direct route runs from ``first`` to ``second``; the two-leg route goes
+    by way of ``third``.
+    """
+
+    first: PlainPoint
+    second: PlainPoint
+    third: PlainPoint
+
+    model_config = {"extra": "forbid"}
+
+
+class MetricAxioms(BaseModel):
+    """One metric's answers to the four checks on the three people.
+
+    ``self_distance`` is the first person against themselves, which a
+    distance must put at zero. ``forward`` and ``backward`` are the direct
+    route measured each way, which must agree. ``via`` is the two legs by way
+    of the third person summed, which may never fall below ``forward``;
+    ``triangle_holds`` is that comparison, with an ulp of tolerance.
+    ``origin_self_distance`` is a row of zeros against itself, which is the
+    one place cosine has no direction and answers one.
+    """
+
+    metric: DistanceMetric
+    self_distance: float
+    forward: float
+    backward: float
+    leg_one: float
+    leg_two: float
+    via: float
+    triangle_holds: bool
+    origin_self_distance: float
+
+
+class TripleResponse(BaseModel):
+    """The four checks under every metric, in the order the library declares."""
+
+    metrics: list[MetricAxioms]
+
+
+@router.post("/axioms", response_model=TripleResponse)
+def axioms(request: TripleRequest) -> TripleResponse:
+    """Put three people through the checks a distance has to pass, six times."""
+    first, second = _blocks(request.first, request.second)
+    third, _ = _blocks(request.third, request.third)
+    origin = RowBlock(np.zeros((1, 2), dtype=np.float64), PAIR_FEATURE_NAMES)
+
+    metrics: list[MetricAxioms] = []
+    for metric in DistanceMetric:
+        forward = float(metric.between(first, second)[0, 0])
+        leg_one = float(metric.between(first, third)[0, 0])
+        leg_two = float(metric.between(third, second)[0, 0])
+        via = leg_one + leg_two
+        metrics.append(
+            MetricAxioms(
+                metric=metric,
+                self_distance=float(metric.between(first, first)[0, 0]),
+                forward=forward,
+                backward=float(metric.between(second, first)[0, 0]),
+                leg_one=leg_one,
+                leg_two=leg_two,
+                via=via,
+                triangle_holds=bool(via >= forward - TRIANGLE_TOLERANCE),
+                origin_self_distance=float(metric.between(origin, origin)[0, 0]),
+            )
+        )
+
+    return TripleResponse(metrics=metrics)
+
+
+class UnitsRequest(BaseModel):
+    """The crowd, the query, the metric, k, and how far to rescale weight.
+
+    ``weight_factor`` multiplies every weight, the query's included, so a
+    thousand turns kilograms into grams without changing a single person.
+    """
+
+    points: list[LabelledPoint] = Field(min_length=1, max_length=MAX_POINTS)
+    query: PlainPoint
+    metric: DistanceMetric
+    k: int = Field(ge=1, le=MAX_K)
+    weight_factor: float = Field(default=1000.0, gt=0.0, le=MAX_WEIGHT_FACTOR)
+
+    model_config = {"extra": "forbid"}
+
+
+class Treatment(BaseModel):
+    """The crowd refitted after one treatment of its columns.
+
+    ``height_share_of_squared_gaps`` is a definition rather than a fit: over
+    every stored person, the squared height gap to the query summed, over the
+    squared height and weight gaps summed together. It is the share of the
+    Euclidean arithmetic one column is doing, whatever metric the ranking
+    used, and it is the number that says which column the distance is
+    actually reading.
+    """
+
+    name: str
+    query: PlainPoint
+    prediction: int
+    neighbours: list[ChosenNeighbour]
+    ranked: list[RankedPerson]
+    height_share_of_squared_gaps: float
+
+
+class UnitsResponse(BaseModel):
+    """The same crowd fitted raw, with weight rescaled, and standardised."""
+
+    metric: DistanceMetric
+    weight_factor: float
+    treatments: list[Treatment]
+
+
+def _treatment(
+    name: str,
+    heights: Feature,
+    weights: Feature,
+    labels: Feature,
+    query_features: list[Feature],
+    point_labels: list[int],
+    metric: DistanceMetric,
+    k: int,
+) -> Treatment:
+    """Fit the classifier on one treatment of the columns and rank the crowd."""
+    model = KNearestNeighboursClassifier(n_neighbours=k, metric=metric).fit(
+        [heights, weights], labels
+    )
+    prediction = int(np.asarray(model.predict(query_features), dtype=np.float64)[0])
+    chosen, ranked = _ranking(model, query_features, point_labels)
+
+    query_x = float(query_features[0].values[0])
+    query_y = float(query_features[1].values[0])
+    height_gaps = heights.values - query_x
+    weight_gaps = weights.values - query_y
+    squared_height = float(np.sum(height_gaps**2))
+    squared_total = squared_height + float(np.sum(weight_gaps**2))
+
+    return Treatment(
+        name=name,
+        query=PlainPoint(x=query_x, y=query_y),
+        prediction=prediction,
+        neighbours=chosen,
+        ranked=ranked,
+        height_share_of_squared_gaps=(
+            squared_height / squared_total if squared_total > 0.0 else 0.0
+        ),
+    )
+
+
+@router.post("/units", response_model=UnitsResponse)
+def units(request: UnitsRequest) -> UnitsResponse:
+    """Refit the crowd raw, with weight rescaled, and standardised.
+
+    The standardised treatment fits the library's standardizer on the crowd
+    and passes the query through the same scalings, which is the order the
+    pipelines page insists on. A constant column is refused by that fit, in
+    the library's words.
+    """
+    heights, weights, labels = features_of(request.points)
+    point_labels = [point.label for point in request.points]
+    query = [
+        Feature("height", [request.query.x]),
+        Feature("weight", [request.query.y]),
+    ]
+
+    raw = _treatment(
+        "raw", heights, weights, labels, query, point_labels, request.metric, request.k
+    )
+
+    scaled_weights = Feature("weight", weights.values * request.weight_factor)
+    scaled_query = [
+        query[0],
+        Feature("weight", [request.query.y * request.weight_factor]),
+    ]
+    rescaled = _treatment(
+        "weight_rescaled",
+        heights,
+        scaled_weights,
+        labels,
+        scaled_query,
+        point_labels,
+        request.metric,
+        request.k,
+    )
+
+    standardizer = Standardizer().fit([heights, weights])
+    standard_heights, standard_weights = standardizer.transform([heights, weights])
+    standard_query = standardizer.transform(query)
+    standardised = _treatment(
+        "standardised",
+        standard_heights,
+        standard_weights,
+        labels,
+        standard_query,
+        point_labels,
+        request.metric,
+        request.k,
+    )
+
+    return UnitsResponse(
+        metric=request.metric,
+        weight_factor=request.weight_factor,
+        treatments=[raw, rescaled, standardised],
+    )
+
+
+class ModelsRequest(BaseModel):
+    """The crowd, unlabelled, and the density clusterer's two settings."""
+
+    points: list[PlainPoint] = Field(min_length=1, max_length=MAX_POINTS)
+    radius: float = Field(gt=0.0, le=MAX_RADIUS)
+    min_neighbourhood_size: int = Field(default=2, ge=1, le=MAX_POINTS)
+
+    model_config = {"extra": "forbid"}
+
+
+class DensityUnderMetric(BaseModel):
+    """What the density clusterer found on the crowd under one metric.
+
+    ``labels`` carries -1 for a person in no group, the library's own answer
+    for noise.
+    """
+
+    metric: DistanceMetric
+    n_clusters: int
+    n_noise: int
+    labels: list[int]
+
+
+class LinkageUnderMetric(BaseModel):
+    """Single linkage on the crowd under one metric, cut at two groups.
+
+    Reported because it is the second model that takes the metric as a real
+    choice, and because its merge heights are in the metric's own units. Two
+    people cut at two groups make no merge at all, and the heights are then
+    ``None`` rather than a number invented for the occasion.
+    """
+
+    metric: DistanceMetric
+    labels: list[int]
+    first_merge: float | None
+    last_merge: float | None
+
+
+class CentreArgument(BaseModel):
+    """Why k-means takes no metric, worked on the crowd's weight column.
+
+    The total squared gap from a centre is smallest at the mean, and the total
+    absolute gap is smallest at the median. Each pair of numbers shows the
+    other centre losing, which is the whole of the argument: the update step
+    of k-means is a mean, and a mean is the right centre for squared
+    Euclidean distance and for nothing else. Definitions computed here.
+    """
+
+    mean: float
+    median: float
+    squared_at_mean: float
+    squared_at_median: float
+    absolute_at_mean: float
+    absolute_at_median: float
+
+
+class WardRefusal(BaseModel):
+    """What happens when ward linkage is paired with a metric other than Euclidean."""
+
+    refused: bool
+    message: str
+
+
+class ModelsResponse(BaseModel):
+    """The crowd under every metric on the two models that let it choose."""
+
+    density: list[DensityUnderMetric]
+    single_linkage: list[LinkageUnderMetric]
+    centre_argument: CentreArgument
+    ward_with_manhattan: WardRefusal
+
+
+def _plain_features(points: list[PlainPoint]) -> list[Feature]:
+    """The two columns an unlabelled crowd supplies."""
+    return [
+        Feature("height", [point.x for point in points]),
+        Feature("weight", [point.y for point in points]),
+    ]
+
+
+@router.post("/models", response_model=ModelsResponse)
+def models(request: ModelsRequest) -> ModelsResponse:
+    """Fit the density and linkage clusterers under every metric, and refuse ward.
+
+    Too few people for the linkage cut is refused by the library and arrives
+    as a 422.
+    """
+    features = _plain_features(request.points)
+
+    density: list[DensityUnderMetric] = []
+    single_linkage: list[LinkageUnderMetric] = []
+    for metric in DistanceMetric:
+        fitted = DBSCAN(
+            radius=request.radius,
+            min_neighbourhood_size=request.min_neighbourhood_size,
+            metric=metric,
+        ).fit(features)
+        density.append(
+            DensityUnderMetric(
+                metric=metric,
+                n_clusters=fitted.n_clusters,
+                n_noise=fitted.n_noise,
+                labels=[int(value) for value in fitted.labels],
+            )
+        )
+
+        linked = AgglomerativeClustering(
+            n_clusters=2, linkage=Linkage.SINGLE, metric=metric
+        ).fit(features)
+        heights_of_merges = np.asarray(linked.merge_distances, dtype=np.float64)
+        single_linkage.append(
+            LinkageUnderMetric(
+                metric=metric,
+                labels=[int(value) for value in linked.labels],
+                first_merge=(
+                    float(heights_of_merges[0]) if heights_of_merges.size else None
+                ),
+                last_merge=(
+                    float(heights_of_merges[-1]) if heights_of_merges.size else None
+                ),
+            )
+        )
+
+    weights = np.array([point.y for point in request.points], dtype=np.float64)
+    mean = float(weights.mean())
+    median = float(np.median(weights))
+    centre_argument = CentreArgument(
+        mean=mean,
+        median=median,
+        squared_at_mean=float(np.sum((weights - mean) ** 2)),
+        squared_at_median=float(np.sum((weights - median) ** 2)),
+        absolute_at_mean=float(np.sum(np.abs(weights - mean))),
+        absolute_at_median=float(np.sum(np.abs(weights - median))),
+    )
+
+    try:
+        AgglomerativeClustering(
+            n_clusters=2, linkage=Linkage.WARD, metric=DistanceMetric.MANHATTAN
+        )
+        ward = WardRefusal(refused=False, message="")
+    except ValidationError as error:
+        ward = WardRefusal(refused=True, message=error.errors()[0]["msg"])
+
+    return ModelsResponse(
+        density=density,
+        single_linkage=single_linkage,
+        centre_argument=centre_argument,
+        ward_with_manhattan=ward,
+    )
+
+
+class DimensionsRequest(BaseModel):
+    """How many uniform rows to draw per feature count, and the seed."""
+
+    n_points: int = Field(default=200, ge=10, le=MAX_DIMENSION_POINTS)
+    seed: int = Field(default=0, ge=0, le=1_000_000)
+
+    model_config = {"extra": "forbid"}
+
+
+class ContrastAtDimension(BaseModel):
+    """How much further the farthest row is than the nearest, at one width.
+
+    Every row is a query against every other row. ``nearest`` and
+    ``farthest`` are the means over rows of each row's nearest and farthest
+    distance, and ``relative_contrast`` is the mean over rows of
+    ``(farthest - nearest) / nearest``, which is the library's own measure.
+    ``median_relative_contrast`` is the median of the same ratios, kept
+    because one row whose nearest neighbour is almost on top of it makes the
+    mean enormous without saying anything about the other rows, which is what
+    cosine does in two features. Near zero, either way, the nearest row is
+    barely nearer than the farthest.
+    """
+
+    dimensions: int
+    nearest: float
+    farthest: float
+    relative_contrast: float
+    median_relative_contrast: float
+
+
+class MetricContrast(BaseModel):
+    """One metric's contrast at every feature count measured."""
+
+    metric: DistanceMetric
+    contrasts: list[ContrastAtDimension]
+
+
+class DimensionsResponse(BaseModel):
+    """Every metric's contrast curve, on rows drawn once and reused."""
+
+    n_points: int
+    seed: int
+    dimensions: list[int]
+    metrics: list[MetricContrast]
+
+
+def _contrast(metric: DistanceMetric, rows: RowBlock) -> ContrastAtDimension:
+    """Each row against every other, and how far the farthest is beyond the nearest."""
+    distances = metric.between(rows, rows)
+    np.fill_diagonal(distances, np.nan)
+    nearest = np.nanmin(distances, axis=1)
+    farthest = np.nanmax(distances, axis=1)
+    ratio = np.divide(
+        farthest - nearest,
+        nearest,
+        out=np.zeros_like(nearest),
+        where=nearest > 0.0,
+    )
+
+    return ContrastAtDimension(
+        dimensions=rows.n_features,
+        nearest=float(nearest.mean()),
+        farthest=float(farthest.mean()),
+        relative_contrast=float(ratio.mean()),
+        median_relative_contrast=float(np.median(ratio)),
+    )
+
+
+@cache
+def _dimensions(n_points: int, seed: int) -> DimensionsResponse:
+    """Draw the rows once per setting; the page asks for the same one repeatedly."""
+    generator = np.random.default_rng(seed)
+    widest = generator.random((n_points, max(DIMENSIONS)))
+
+    metrics: list[MetricContrast] = []
+    for metric in DistanceMetric:
+        contrasts: list[ContrastAtDimension] = []
+        for dimensions in DIMENSIONS:
+            rows = RowBlock(
+                np.ascontiguousarray(widest[:, :dimensions]),
+                tuple(f"feature_{position}" for position in range(dimensions)),
+            )
+            contrasts.append(_contrast(metric, rows))
+        metrics.append(MetricContrast(metric=metric, contrasts=contrasts))
+
+    return DimensionsResponse(
+        n_points=n_points, seed=seed, dimensions=list(DIMENSIONS), metrics=metrics
+    )
+
+
+@router.post("/dimensions", response_model=DimensionsResponse)
+def dimensions(request: DimensionsRequest) -> DimensionsResponse:
+    """Measure how distance stops discriminating as the feature count grows.
+
+    The rows in one feature are the first column of the rows in two hundred,
+    so every width measures the same draw truncated rather than a fresh one.
+    """
+    return _dimensions(request.n_points, request.seed)

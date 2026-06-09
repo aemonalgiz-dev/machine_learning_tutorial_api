@@ -252,8 +252,6 @@ class TestRefusals:
         assert response.status_code == 422
 
     def test_a_pattern_too_narrow_to_be_a_network_is_refused(self) -> None:
-        response = client.post(
-            RECALL, json={"patterns": [[1, -1, 1]], "probe": [1, -1, 1]}
-        )
+        response = client.post(RECALL, json={"patterns": [[1]], "probe": [1]})
 
         assert response.status_code == 422

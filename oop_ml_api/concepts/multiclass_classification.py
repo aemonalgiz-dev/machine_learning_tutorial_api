@@ -31,6 +31,7 @@ from typing import Literal
 import numpy as np
 from fastapi import APIRouter, HTTPException
 from oop_ml import (
+    DesignMatrix,
     Feature,
     LogisticRegression,
     MultinomialLogisticRegression,
@@ -38,9 +39,14 @@ from oop_ml import (
     Predictions,
     Standardizer,
 )
+from oop_ml.core.logistic import stable_softmax
 from pydantic import BaseModel, Field
 
-from oop_ml_api.concepts.two_feature_classification import RegionGrid, region_grid
+from oop_ml_api.concepts.two_feature_classification import (
+    GRID_CELLS,
+    RegionGrid,
+    region_grid,
+)
 from oop_ml_api.limits import MAX_MAGNITUDE, MAX_POINTS
 
 router = APIRouter(
@@ -88,12 +94,27 @@ class ClassedPoint(BaseModel):
 
 
 class ClassifyRequest(BaseModel):
-    """The crowd, and which of the two routes to three classes to take."""
+    """The crowd, which of the two routes to three classes to take, and how
+    many passes the ascent may spend, up to the page's cap."""
 
     points: list[ClassedPoint] = Field(min_length=N_CLASSES, max_length=MAX_POINTS)
     route: Route
+    max_epochs: int = Field(default=MAX_EPOCHS, ge=1, le=MAX_EPOCHS)
 
     model_config = {"extra": "forbid"}
+
+
+class ClassCoefficients(BaseModel):
+    """One class's score, as an intercept and a weight per standardised column.
+
+    Under softmax class 0 is the reference and every entry is zero; under
+    one-vs-rest they are that class's own binary fit.
+    """
+
+    class_index: int
+    intercept: float
+    height: float
+    weight: float
 
 
 class ClassFitDocument(BaseModel):
@@ -134,6 +155,12 @@ class ClassifyResponse(BaseModel):
     converged: bool | None
     class_fits: list[ClassFitDocument]
     regions: RegionGrid
+    standardised_points: list[list[float]]
+    class_coefficients: list[ClassCoefficients]
+    score_lattice: list[list[list[float]]]
+    correct_class_scores: list[float]
+    log_loss: float
+    coefficient_norm: float
 
 
 class _FittedRoute:
@@ -152,12 +179,26 @@ class _FittedRoute:
         epochs_run: int | None,
         converged: bool | None,
         class_fits: list[ClassFitDocument],
+        coefficients: list[ClassCoefficients],
     ) -> None:
         self.model = model
         self.linear_scores = linear_scores
         self.epochs_run = epochs_run
         self.converged = converged
         self.class_fits = class_fits
+        self.coefficients = coefficients
+
+    def scores_at(self, standardised: Sequence[Feature]) -> np.ndarray:
+        """The linear score of every class at every row of standardised columns."""
+        named = {feature.name: np.asarray(feature.values) for feature in standardised}
+        return np.column_stack(
+            [
+                each.intercept
+                + each.height * named["height"]
+                + each.weight * named["weight"]
+                for each in self.coefficients
+            ]
+        )
 
 
 class _StandardisedClassifier:
@@ -182,7 +223,9 @@ class _StandardisedClassifier:
         return self._model.predict(self._standardizer.transform(input_values))
 
 
-def _softmax_route(standardised: Sequence[Feature], labels: Feature) -> _FittedRoute:
+def _softmax_route(
+    standardised: Sequence[Feature], labels: Feature, max_epochs: int
+) -> _FittedRoute:
     """Fit one score per class against the reference, and read the scores back.
 
     The scores before the squash are each class's intercept plus its weights
@@ -192,17 +235,26 @@ def _softmax_route(standardised: Sequence[Feature], labels: Feature) -> _FittedR
     every other class against it.
     """
     model = MultinomialLogisticRegression(
-        learning_rate=LEARNING_RATE, max_epochs=MAX_EPOCHS, tolerance=TOLERANCE
+        learning_rate=LEARNING_RATE, max_epochs=max_epochs, tolerance=TOLERANCE
     ).fit(standardised, labels)
 
     intercepts = model.intercepts
     columns = []
+    documents = []
     for class_index in range(model.n_classes):
         coefficients = model.coefficients_for(class_index)
         column = np.full(labels.n_samples, float(intercepts[class_index]))
         for feature in standardised:
             column = column + coefficients[feature.name] * feature.values
         columns.append(column)
+        documents.append(
+            ClassCoefficients(
+                class_index=class_index,
+                intercept=float(intercepts[class_index]),
+                height=float(coefficients["height"]),
+                weight=float(coefficients["weight"]),
+            )
+        )
 
     return _FittedRoute(
         model=model,
@@ -210,11 +262,12 @@ def _softmax_route(standardised: Sequence[Feature], labels: Feature) -> _FittedR
         epochs_run=int(model.epochs_run),
         converged=bool(model.converged),
         class_fits=[],
+        coefficients=documents,
     )
 
 
 def _one_vs_rest_route(
-    standardised: Sequence[Feature], labels: Feature
+    standardised: Sequence[Feature], labels: Feature, max_epochs: int
 ) -> _FittedRoute:
     """Fit one binary curve per class, and read each curve's own log-odds back.
 
@@ -225,12 +278,13 @@ def _one_vs_rest_route(
     """
     model = OneVsRestClassifier(
         binary_model=LogisticRegression(
-            learning_rate=LEARNING_RATE, max_epochs=MAX_EPOCHS, tolerance=TOLERANCE
+            learning_rate=LEARNING_RATE, max_epochs=max_epochs, tolerance=TOLERANCE
         )
     ).fit(standardised, labels)
 
     columns = []
     class_fits = []
+    documents = []
     for class_index in range(model.n_classes):
         binary_model = model.model_for(class_index)
         column = np.full(labels.n_samples, float(binary_model.intercept))
@@ -245,6 +299,14 @@ def _one_vs_rest_route(
                 converged=bool(binary_model.converged),
             )
         )
+        documents.append(
+            ClassCoefficients(
+                class_index=class_index,
+                intercept=float(binary_model.intercept),
+                height=float(binary_model.coefficients["height"]),
+                weight=float(binary_model.coefficients["weight"]),
+            )
+        )
 
     return _FittedRoute(
         model=model,
@@ -252,6 +314,27 @@ def _one_vs_rest_route(
         epochs_run=None,
         converged=None,
         class_fits=class_fits,
+        coefficients=documents,
+    )
+
+
+def _log_loss(route: Route, scores: np.ndarray, labels: np.ndarray) -> float:
+    """The loss each route was actually fitted to, on the crowd it was fitted to.
+
+    Softmax minimises the mean of minus the log of the probability it gave
+    the correct class. One-vs-rest fits three binary losses, one per class,
+    so its figure is the mean binary log loss across the three fits, which is
+    a different objective and is reported as one rather than dressed up as
+    the other.
+    """
+    clipped = np.clip(scores, 1e-15, 1 - 1e-15)
+    rows = np.arange(labels.size)
+    if route == "softmax":
+        return float(-np.mean(np.log(clipped[rows, labels.astype(int)])))
+    indicator = np.zeros_like(clipped)
+    indicator[rows, labels.astype(int)] = 1.0
+    return float(
+        -np.mean(indicator * np.log(clipped) + (1 - indicator) * np.log(1 - clipped))
     )
 
 
@@ -284,14 +367,33 @@ def classify(request: ClassifyRequest) -> ClassifyResponse:
     standardised = standardizer.transform([heights, weights])
 
     if request.route == "softmax":
-        fitted = _softmax_route(standardised, labels)
+        fitted = _softmax_route(standardised, labels, request.max_epochs)
     else:
-        fitted = _one_vs_rest_route(standardised, labels)
+        fitted = _one_vs_rest_route(standardised, labels, request.max_epochs)
 
     scores = np.asarray(
         fitted.model.predict_probabilities(standardised), dtype=np.float64
     )
     predictions = np.asarray(fitted.model.predict(standardised), dtype=np.float64)
+    regions = region_grid(
+        _StandardisedClassifier(standardizer, fitted.model), request.points
+    )
+
+    # The same lattice the regions were drawn on, scored class by class, so
+    # the page can draw the three score planes the regions are the top of.
+    lattice_x, lattice_y = np.meshgrid(
+        np.linspace(regions.x_min, regions.x_max, GRID_CELLS),
+        np.linspace(regions.y_min, regions.y_max, GRID_CELLS),
+    )
+    lattice_scores = fitted.scores_at(
+        standardizer.transform(
+            [
+                Feature("height", lattice_x.ravel()),
+                Feature("weight", lattice_y.ravel()),
+            ]
+        )
+    )
+    label_indices = labels.values.astype(int)
 
     return ClassifyResponse(
         route=request.route,
@@ -303,7 +405,119 @@ def classify(request: ClassifyRequest) -> ClassifyResponse:
         epochs_run=fitted.epochs_run,
         converged=fitted.converged,
         class_fits=fitted.class_fits,
-        regions=region_grid(
-            _StandardisedClassifier(standardizer, fitted.model), request.points
+        regions=regions,
+        standardised_points=[
+            [float(height), float(weight)]
+            for height, weight in zip(
+                standardised[0].values, standardised[1].values, strict=True
+            )
+        ],
+        class_coefficients=fitted.coefficients,
+        score_lattice=[
+            [
+                [float(value) for value in row]
+                for row in lattice_scores[:, class_index].reshape(
+                    GRID_CELLS, GRID_CELLS
+                )
+            ]
+            for class_index in range(N_CLASSES)
+        ],
+        correct_class_scores=[
+            float(scores[row, label]) for row, label in enumerate(label_indices)
+        ],
+        log_loss=_log_loss(request.route, scores, labels.values),
+        coefficient_norm=float(
+            np.sqrt(
+                sum(each.height**2 + each.weight**2 for each in fitted.coefficients)
+            )
         ),
+    )
+
+
+class SoftmaxWalkRequest(BaseModel):
+    """The crowd, and how many passes of the softmax ascent to record."""
+
+    points: list[ClassedPoint] = Field(min_length=N_CLASSES, max_length=MAX_POINTS)
+    max_epochs: int = Field(default=MAX_EPOCHS, ge=1, le=MAX_EPOCHS)
+
+    model_config = {"extra": "forbid"}
+
+
+class SoftmaxPass(BaseModel):
+    """Where the joint ascent stood after one pass.
+
+    ``correct_class_probabilities`` is, for each person in request order, the
+    probability the model gave their own class at that pass.
+    """
+
+    pass_number: int
+    coefficient_norm: float
+    log_loss: float
+    accuracy: float
+    correct_class_probabilities: list[float]
+
+
+class SoftmaxWalkResponse(BaseModel):
+    """Every pass of the softmax ascent, and the library's verdict on the budget."""
+
+    passes: list[SoftmaxPass]
+    converged: bool
+    passes_run: int
+
+
+@router.post("/walk", response_model=SoftmaxWalkResponse)
+def walk(request: SoftmaxWalkRequest) -> SoftmaxWalkResponse:
+    """Record the softmax ascent pass by pass on the standardised crowd.
+
+    The library's observed route keeps the weights as a matrix, one row per
+    class above the reference, and each recorded pass is read back into
+    scores, probabilities and a loss here so the page can show accuracy
+    reaching one while the coefficients keep growing.
+    """
+    present = {point.label for point in request.points}
+    if len(present) < N_CLASSES:
+        raise HTTPException(
+            status_code=422,
+            detail="a choice among three classes needs at least one person in each",
+        )
+
+    heights = Feature("height", [point.x for point in request.points])
+    weights = Feature("weight", [point.y for point in request.points])
+    labels = Feature("age_group", [float(point.label) for point in request.points])
+    standardised = Standardizer().fit([heights, weights]).transform([heights, weights])
+
+    model = MultinomialLogisticRegression(
+        learning_rate=LEARNING_RATE, max_epochs=request.max_epochs, tolerance=TOLERANCE
+    ).fit(standardised, labels)
+
+    values = np.column_stack(
+        [np.ones(labels.n_samples), standardised[0].values, standardised[1].values]
+    )
+    design = DesignMatrix(np.asfortranarray(values), ["height", "weight"], True)
+    path = model.solver_path(design, labels.column)
+
+    label_indices = labels.values.astype(int)
+    rows = np.arange(labels.n_samples)
+    passes: list[SoftmaxPass] = []
+    for step in path:
+        above_reference = np.asarray(step.weights_after, dtype=np.float64)
+        scores = np.column_stack(
+            [np.zeros(labels.n_samples), values @ above_reference.T]
+        )
+        probabilities = stable_softmax(scores)
+        correct = probabilities[rows, label_indices]
+        passes.append(
+            SoftmaxPass(
+                pass_number=step.pass_number,
+                coefficient_norm=float(np.sqrt(np.sum(above_reference[:, 1:] ** 2))),
+                log_loss=float(-np.mean(np.log(np.clip(correct, 1e-15, 1.0)))),
+                accuracy=float(
+                    np.mean(np.argmax(probabilities, axis=1) == label_indices)
+                ),
+                correct_class_probabilities=[float(value) for value in correct],
+            )
+        )
+
+    return SoftmaxWalkResponse(
+        passes=passes, converged=bool(path.converged), passes_run=int(path.passes_run)
     )

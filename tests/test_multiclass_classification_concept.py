@@ -14,6 +14,8 @@ else's from 1.31 to 1.50 under one-vs-rest, and every total is one under
 softmax. All pinned here.
 """
 
+import math
+
 import numpy as np
 from fastapi.testclient import TestClient
 
@@ -260,3 +262,85 @@ class TestRefusals:
         )
 
         assert response.status_code == 422
+
+
+WALK = "/concepts/multiclass-classification/walk"
+
+
+class TestScoreLattice:
+    def test_the_lattice_has_one_plane_per_class(self) -> None:
+        body = client.post(CLASSIFY, json={"points": CROWD, "route": "softmax"}).json()
+
+        assert len(body["score_lattice"]) == 3
+        assert len(body["score_lattice"][0]) == body["regions"]["cells"]
+        assert all(value == 0.0 for row in body["score_lattice"][0] for value in row)
+
+    def test_the_highest_plane_is_the_region_label(self) -> None:
+        body = client.post(CLASSIFY, json={"points": CROWD, "route": "softmax"}).json()
+
+        cells = body["regions"]["cells"]
+        for row in range(cells):
+            for column in range(cells):
+                scores = [body["score_lattice"][k][row][column] for k in range(3)]
+                assert (
+                    scores.index(max(scores)) == body["regions"]["labels"][row][column]
+                )
+
+    def test_the_middle_person_is_standardised_to_the_origin(self) -> None:
+        body = client.post(
+            CLASSIFY, json={"points": THREE_PEOPLE, "route": "softmax"}
+        ).json()
+
+        assert abs(body["standardised_points"][1][0]) < 1e-12
+        assert abs(body["standardised_points"][1][1]) < 1e-12
+        assert abs(body["class_coefficients"][1]["intercept"] - 3.9602) < 1e-3
+
+    def test_the_softmax_log_loss_is_the_mean_cost_of_the_correct_class(self) -> None:
+        body = client.post(
+            CLASSIFY, json={"points": THREE_PEOPLE, "route": "softmax"}
+        ).json()
+
+        expected = -sum(math.log(p) for p in body["correct_class_scores"]) / 3
+        assert abs(body["log_loss"] - expected) < 1e-9
+
+    def test_a_short_budget_leaves_a_smaller_norm(self) -> None:
+        short = client.post(
+            CLASSIFY,
+            json={"points": THREE_PEOPLE, "route": "softmax", "max_epochs": 50},
+        ).json()
+        long = client.post(
+            CLASSIFY,
+            json={"points": THREE_PEOPLE, "route": "softmax", "max_epochs": 500},
+        ).json()
+
+        assert short["coefficient_norm"] < long["coefficient_norm"]
+        assert short["accuracy"] == long["accuracy"] == 1.0
+
+
+class TestSoftmaxWalk:
+    def test_accuracy_is_perfect_long_before_the_norm_stops_growing(self) -> None:
+        body = client.post(
+            WALK, json={"points": THREE_PEOPLE, "max_epochs": 500}
+        ).json()
+
+        first_perfect = next(each for each in body["passes"] if each["accuracy"] == 1.0)
+        last = body["passes"][-1]
+        assert first_perfect["pass_number"] < 50
+        assert last["coefficient_norm"] > first_perfect["coefficient_norm"] * 1.5
+        assert last["log_loss"] < first_perfect["log_loss"]
+        assert body["converged"] is False
+
+    def test_the_final_pass_agrees_with_the_classify_endpoint(self) -> None:
+        walked = client.post(
+            WALK, json={"points": THREE_PEOPLE, "max_epochs": 200}
+        ).json()
+        fitted = client.post(
+            CLASSIFY,
+            json={"points": THREE_PEOPLE, "route": "softmax", "max_epochs": 200},
+        ).json()
+
+        assert abs(walked["passes"][-1]["log_loss"] - fitted["log_loss"]) < 1e-9
+        assert (
+            abs(walked["passes"][-1]["coefficient_norm"] - fitted["coefficient_norm"])
+            < 1e-9
+        )

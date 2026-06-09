@@ -40,11 +40,12 @@ from oop_ml import (
     GradientDescentRegression,
     MultipleLinearRegression,
     RegressionEvaluation,
+    Standardizer,
 )
 from pydantic import BaseModel, Field
 
 from oop_ml_api.concepts.unsupervised import PlainPoint
-from oop_ml_api.limits import MAX_POINTS, MIN_POINTS
+from oop_ml_api.limits import MAX_MAGNITUDE, MAX_POINTS, MIN_POINTS
 
 router = APIRouter(tags=["gradient-descent-regression"])
 
@@ -447,4 +448,297 @@ def rate_sweep(request: RateSweepRequest) -> RateSweepResponse:
             people.library_verdict(learning_rate, request.max_epochs)
             for learning_rate in request.learning_rates
         ],
+    )
+
+
+SLICE_SAMPLES = 61
+"""How many points each one-parameter loss slice is sampled at."""
+
+SURFACE_SAMPLES = 41
+"""The loss surface is sampled on a lattice this many per side."""
+
+Parameterisation = Literal["raw", "centred", "scaled"]
+
+
+class CandidateRequest(BaseModel):
+    """One line the reader is holding, and the rate a pass would use from it."""
+
+    points: list[PlainPoint] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+    level: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+    slope: float = Field(ge=-MAX_MAGNITUDE, le=MAX_MAGNITUDE)
+    learning_rate: float = Field(gt=0.0, le=MAX_LEARNING_RATE)
+
+    model_config = {"extra": "forbid"}
+
+
+class ObservationContribution(BaseModel):
+    """What one person adds to the loss and to each gradient component.
+
+    The level share is ``-(2/n) e`` and the slope share is ``-(2/n) e x'``,
+    so a person standing at the mean height contributes to the level gradient
+    and nothing at all to the slope gradient.
+    """
+
+    centred_height: float
+    weight: float
+    prediction: float
+    residual: float
+    squared_residual: float
+    level_share: float
+    slope_share: float
+
+
+class LossSlice(BaseModel):
+    """The loss along one parameter with the other held where it is."""
+
+    axis: list[float]
+    losses: list[float]
+
+
+class CandidateResponse(BaseModel):
+    """Everything one pass reads and writes from the line the reader holds."""
+
+    mean_height: float
+    standing: LinePosition
+    observations: list[ObservationContribution]
+    gradient_level: float
+    gradient_slope: float
+    next_position: LinePosition
+    level_slice: LossSlice
+    slope_slice: LossSlice
+    closed_form: LinePosition
+
+
+@router.post(
+    "/concepts/gradient-descent-regression/candidate",
+    response_model=CandidateResponse,
+)
+def candidate(request: CandidateRequest) -> CandidateResponse:
+    """Score the line the reader holds, read its gradient, and take one pass."""
+    people = PreparedPeople(request.points)
+    closed_form = people.closed_form()
+    standing = people.position(request.level, request.slope)
+
+    row_count = people.weights.size
+    predictions = request.level + request.slope * people.centred_heights
+    residuals = people.weights - predictions
+    level_shares = -(2.0 / row_count) * residuals
+    slope_shares = level_shares * people.centred_heights
+    gradient_level = float(np.sum(level_shares))
+    gradient_slope = float(np.sum(slope_shares))
+
+    next_position = people.position(
+        request.level - request.learning_rate * gradient_level,
+        request.slope - request.learning_rate * gradient_slope,
+    )
+
+    level_reach = max(
+        20.0, 1.5 * abs(closed_form.level - request.level), 0.3 * abs(closed_form.level)
+    )
+    level_axis = np.linspace(
+        request.level - level_reach, request.level + level_reach, SLICE_SAMPLES
+    )
+    slope_reach = max(0.6, 1.5 * abs(closed_form.slope - request.slope))
+    slope_axis = np.linspace(
+        request.slope - slope_reach, request.slope + slope_reach, SLICE_SAMPLES
+    )
+
+    return CandidateResponse(
+        mean_height=people.mean_height,
+        standing=standing,
+        observations=[
+            ObservationContribution(
+                centred_height=float(height),
+                weight=float(weight),
+                prediction=float(prediction),
+                residual=float(residual),
+                squared_residual=float(residual**2),
+                level_share=float(level_share),
+                slope_share=float(slope_share),
+            )
+            for height, weight, prediction, residual, level_share, slope_share in zip(
+                people.centred_heights,
+                people.weights,
+                predictions,
+                residuals,
+                level_shares,
+                slope_shares,
+                strict=True,
+            )
+        ],
+        gradient_level=gradient_level,
+        gradient_slope=gradient_slope,
+        next_position=next_position,
+        level_slice=LossSlice(
+            axis=[float(value) for value in level_axis],
+            losses=[
+                people.position(float(value), request.slope).loss
+                for value in level_axis
+            ],
+        ),
+        slope_slice=LossSlice(
+            axis=[float(value) for value in slope_axis],
+            losses=[
+                people.position(request.level, float(value)).loss
+                for value in slope_axis
+            ],
+        ),
+        closed_form=closed_form,
+    )
+
+
+class SurfaceRequest(BaseModel):
+    """The people, how their heights are handed to the fit, and one walk to trace.
+
+    ``raw`` fits on heights as measured, so the first parameter is the
+    intercept at a height of zero. ``centred`` measures heights from their
+    mean, so it is the level at the mean height. ``scaled`` also divides by the
+    library's own standard deviation, so the slope is per standard deviation
+    rather than per centimetre.
+    """
+
+    points: list[PlainPoint] = Field(min_length=MIN_POINTS, max_length=MAX_POINTS)
+    parameterisation: Parameterisation
+    learning_rate: float = Field(gt=0.0, le=MAX_LEARNING_RATE)
+    max_epochs: int = Field(ge=1, le=MAX_EPOCHS)
+
+    model_config = {"extra": "forbid"}
+
+
+class ParameterPair(BaseModel):
+    """A point in the plane of the two parameters, and the loss there."""
+
+    first: float
+    second: float
+    loss: float
+
+
+class SurfaceResponse(BaseModel):
+    """The loss lattice, its curvatures, and one walk drawn across it.
+
+    ``losses`` is row-major over the second parameter then the first. The
+    two curvatures are the eigenvalues of the loss's second-derivative
+    matrix, which on centred heights are simply the curvatures along the two
+    axes. The walk is recorded by the library and stops before a runaway
+    could overflow, exactly as the walk endpoint does.
+    """
+
+    first_name: str
+    second_name: str
+    first_axis: list[float]
+    second_axis: list[float]
+    losses: list[list[float]]
+    optimum: ParameterPair
+    smallest_curvature: float
+    largest_curvature: float
+    condition_number: float
+    divergence_threshold: float
+    walk: list[ParameterPair]
+    outcome: WalkOutcome
+
+
+@router.post(
+    "/concepts/gradient-descent-regression/loss-surface",
+    response_model=SurfaceResponse,
+)
+def loss_surface(request: SurfaceRequest) -> SurfaceResponse:
+    """Sample the loss over both parameters and walk across it once."""
+    heights = np.asarray([point.x for point in request.points], dtype=np.float64)
+    weights = np.asarray([point.y for point in request.points], dtype=np.float64)
+
+    if request.parameterisation == "raw":
+        column = heights
+        first_name, second_name = "intercept", "slope per cm"
+    elif request.parameterisation == "centred":
+        column = heights - float(np.mean(heights))
+        first_name, second_name = "level", "slope per cm"
+    else:
+        scaled = Standardizer().fit([Feature("height", heights)])
+        column = np.asarray(
+            scaled.transform([Feature("height", heights)])[0].values, dtype=np.float64
+        )
+        first_name, second_name = "level", "slope per standard deviation"
+
+    row_count = heights.size
+    values = np.empty((row_count, 2), order="F")
+    values[:, 0] = 1.0
+    values[:, 1] = column
+    design = DesignMatrix(values, ["height"], True)
+    target = Feature(WEIGHT, weights).column
+
+    hessian = (2.0 / row_count) * values.T @ values
+    eigenvalues = np.linalg.eigvalsh(hessian)
+    smallest, largest = float(eigenvalues[0]), float(eigenvalues[-1])
+
+    fitted = MultipleLinearRegression().fit(
+        [Feature("height", column)], Feature(WEIGHT, weights)
+    )
+    optimum_first = float(fitted.intercept)
+    optimum_second = float(fitted.coefficients["height"])
+
+    def loss_at(first: float, second: float) -> float:
+        predicted = values @ np.asarray([first, second], dtype=np.float64)
+        return float(RegressionEvaluation(target.values, predicted).mean_squared_error)
+
+    error_factor = max(
+        abs(1.0 - request.learning_rate * smallest),
+        abs(1.0 - request.learning_rate * largest),
+    )
+    passes_to_record = _passes_to_record(
+        request.max_epochs, error_factor, math.hypot(optimum_first, optimum_second)
+    )
+    model = GradientDescentRegression(
+        learning_rate=request.learning_rate, max_epochs=passes_to_record
+    )
+    path = model.solver_path(design, target)
+    walked = [ParameterPair(first=0.0, second=0.0, loss=loss_at(0.0, 0.0))]
+    for step in path:
+        first, second = float(step.weights_after[0]), float(step.weights_after[1])
+        walked.append(
+            ParameterPair(first=first, second=second, loss=loss_at(first, second))
+        )
+
+    if path.converged:
+        outcome: WalkOutcome = "converged"
+    elif error_factor > 1.0:
+        outcome = "diverged"
+    else:
+        outcome = "pass_limit_reached"
+
+    # The lattice is centred on the optimum and wide enough to hold the start
+    # at zero, with a margin, in both directions.
+    first_reach = 1.25 * max(abs(optimum_first), 1.0)
+    second_reach = 1.25 * max(abs(optimum_second), 0.25)
+    first_axis = np.linspace(
+        optimum_first - first_reach, optimum_first + first_reach, SURFACE_SAMPLES
+    )
+    second_axis = np.linspace(
+        optimum_second - second_reach, optimum_second + second_reach, SURFACE_SAMPLES
+    )
+    lattice_first, lattice_second = np.meshgrid(first_axis, second_axis)
+    predictions = (
+        lattice_first.ravel()[:, None]
+        + lattice_second.ravel()[:, None] * column[None, :]
+    )
+    losses = np.mean((weights[None, :] - predictions) ** 2, axis=1).reshape(
+        SURFACE_SAMPLES, SURFACE_SAMPLES
+    )
+
+    return SurfaceResponse(
+        first_name=first_name,
+        second_name=second_name,
+        first_axis=[float(value) for value in first_axis],
+        second_axis=[float(value) for value in second_axis],
+        losses=[[float(value) for value in row] for row in losses],
+        optimum=ParameterPair(
+            first=optimum_first,
+            second=optimum_second,
+            loss=loss_at(optimum_first, optimum_second),
+        ),
+        smallest_curvature=smallest,
+        largest_curvature=largest,
+        condition_number=largest / smallest if smallest > 0 else float("inf"),
+        divergence_threshold=2.0 / largest,
+        walk=walked,
+        outcome=outcome,
     )

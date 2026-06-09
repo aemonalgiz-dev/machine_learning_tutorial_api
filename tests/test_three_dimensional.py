@@ -5,7 +5,9 @@ arithmetic put it, slope 0.8, intercept -68 and an RSS of 16, and every
 sampled cell must sit at or above that floor, which is what being the minimum
 means. The plane fit must recover its coefficients and predict its own lattice
 consistently, and the lifted clinic must be separated by a genuinely flat
-plane at accuracy 1.
+plane at accuracy 1. The lift endpoint chooses its own map rather than taking
+a kernel name, so the request carries the patients and nothing else, and the
+accuracy sits inside the summary of the fit that drew the plane.
 """
 
 from typing import ClassVar
@@ -108,6 +110,24 @@ class TestPlaneFit:
                 expected = 0.6 * height + 0.2 * age - 42.0
                 assert abs(body["surface"][row_index][column_index] - expected) < 1e-9
 
+    def test_a_fitted_weight_comes_back_for_every_person(self) -> None:
+        people = [
+            {"height": 160, "age": 20, "weight": 60},
+            {"height": 170, "age": 30, "weight": 70},
+            {"height": 180, "age": 40, "weight": 75},
+            {"height": 190, "age": 50, "weight": 85},
+        ]
+        body = client.post(PLANE, json={"people": people}).json()
+
+        assert len(body["fitted"]) == len(people)
+        for person, fitted in zip(people, body["fitted"], strict=True):
+            expected = (
+                body["intercept"]
+                + body["height_coefficient"] * person["height"]
+                + body["age_coefficient"] * person["age"]
+            )
+            assert abs(fitted - expected) < 1e-9
+
     def test_too_few_people_for_a_plane_is_refused(self) -> None:
         response = client.post(PLANE, json={"people": self.PEOPLE[:2]})
 
@@ -116,12 +136,12 @@ class TestPlaneFit:
 
 class TestLift:
     def test_a_flat_plane_separates_the_lifted_clinic(self) -> None:
-        body = client.post(LIFT, json={"points": CLINIC, "kernel": "polynomial"}).json()
+        body = client.post(LIFT, json={"points": CLINIC}).json()
 
-        assert body["accuracy"] == 1.0
+        assert body["lifted"]["accuracy"] == 1.0
 
     def test_every_point_sits_on_its_side_of_the_plane(self) -> None:
-        body = client.post(LIFT, json={"points": CLINIC, "kernel": "polynomial"}).json()
+        body = client.post(LIFT, json={"points": CLINIC}).json()
 
         plane = body["plane"]
         for point in body["points"]:
@@ -136,7 +156,7 @@ class TestLift:
     def test_the_lift_is_the_worked_mapping(self) -> None:
         # Every lifted point obeys v-squared equal to twice u times w, the
         # signature of (x^2, sqrt(2)xy, y^2), so the lift really is the page's.
-        body = client.post(LIFT, json={"points": CLINIC, "kernel": "polynomial"}).json()
+        body = client.post(LIFT, json={"points": CLINIC}).json()
 
         for point in body["points"]:
             assert abs(point["v"] ** 2 - 2.0 * point["u"] * point["w"]) < 1e-9

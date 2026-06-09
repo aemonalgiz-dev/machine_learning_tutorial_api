@@ -71,6 +71,26 @@ class TestLibraryErrorMapping:
 
         assert response.status_code == 422
 
+    def test_a_nan_in_the_request_is_a_readable_422_not_a_500(self) -> None:
+        """A NaN is refused before computing, and the refusal must be writable.
+
+        The default validation handler echoes the offending value, and a NaN
+        cannot be written as JSON, so the echo used to fail and the learner saw
+        a 500. The shared handler now answers with the location and the message
+        and never the value.
+        """
+        response = client.post(
+            FIT,
+            content='{"points": [{"x": NaN, "y": 1.0}, {"x": 2.0, "y": 3.0}]}',
+            headers={"content-type": "application/json"},
+        )
+
+        assert response.status_code == 422
+        body = response.json()
+        assert body["error"] == "ValidationError"
+        assert isinstance(body["detail"], str)
+        assert "points 0 x" in body["detail"]
+
 
 class TestMeta:
     def test_health_is_ok(self) -> None:

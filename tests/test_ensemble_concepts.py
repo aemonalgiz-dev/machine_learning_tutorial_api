@@ -235,3 +235,165 @@ class TestBoostingDescent:
         )
 
         assert response.status_code == 422
+
+
+ANATOMY = "/concepts/ensembles/bagging-anatomy"
+
+
+class TestBaggingAnatomy:
+    def test_every_member_drew_a_full_sample_with_replacement(self) -> None:
+        body = client.post(ANATOMY, json={"points": TANGLED, "n_members": 10}).json()
+
+        for member in body["members"]:
+            assert len(member["draws"]) == body["n_rows"]
+            assert sum(member["multiplicities"]) == body["n_rows"]
+            assert member["distinct_rows"] + member["omitted_rows"] == body["n_rows"]
+            assert member["distinct_rows"] < body["n_rows"]
+
+    def test_about_a_third_are_omitted_on_average(self) -> None:
+        body = client.post(ANATOMY, json={"points": TANGLED, "n_members": 25}).json()
+
+        mean_omitted = sum(member["omitted_rows"] for member in body["members"]) / 25
+        assert abs(mean_omitted - body["expected_omitted"]) < 2.5
+        assert abs(body["expected_omitted"] - 25 * (24 / 25) ** 25) < 1e-9
+
+    def test_the_sweep_is_the_library_committee_at_each_size(self) -> None:
+        body = client.post(ANATOMY, json={"points": TANGLED, "n_members": 8}).json()
+
+        for size in body["sizes"]:
+            fresh = client.post(
+                "/concepts/ensembles/bagging",
+                json={"points": TANGLED, "n_members": size["n_members"]},
+            ).json()
+            assert abs(size["train_accuracy"] - fresh["accuracy"]) < 1e-12
+            assert size["regions"]["labels"] == fresh["regions"]["labels"]
+
+    def test_out_of_bag_judges_are_the_members_that_missed_the_row(self) -> None:
+        body = client.post(ANATOMY, json={"points": TANGLED, "n_members": 10}).json()
+
+        for row, verdict in enumerate(body["out_of_bag"]):
+            for position in verdict["eligible"]:
+                assert body["members"][position]["multiplicities"][row] == 0
+            for member in body["members"]:
+                if member["multiplicities"][row] == 0:
+                    assert member["position"] in verdict["eligible"]
+
+    def test_stumps_stay_biased_however_many_are_bagged(self) -> None:
+        stumps = client.post(
+            ANATOMY, json={"points": TANGLED, "n_members": 25, "member_depth": 1}
+        ).json()
+        deep = client.post(ANATOMY, json={"points": TANGLED, "n_members": 25}).json()
+
+        assert (
+            stumps["sizes"][-1]["train_accuracy"] < deep["sizes"][-1]["train_accuracy"]
+        )
+        assert all(member["depth"] <= 1 for member in stumps["members"])
+
+    def test_a_single_class_is_refused(self) -> None:
+        response = client.post(
+            ANATOMY,
+            json={"points": [{"x": 1, "y": 1, "label": 0}] * 5, "n_members": 3},
+        )
+        assert response.status_code == 422
+
+
+LOTTERY = "/concepts/ensembles/forest-lottery"
+SAME_SAMPLE = "/concepts/ensembles/forest-same-sample"
+SEEDS = "/concepts/ensembles/forest-seeds"
+WORLDS = "/concepts/ensembles/signal-worlds"
+COMPETITION = "/concepts/ensembles/split-competition"
+
+
+class TestForestAnatomy:
+    def test_a_restricted_committee_spreads_its_roots(self) -> None:
+        bagged = client.post(ANATOMY, json={"points": TANGLED, "n_members": 25}).json()
+        forest = client.post(
+            ANATOMY, json={"points": TANGLED, "n_members": 25, "max_features": 1}
+        ).json()
+
+        assert forest["roots_on_weight"] > bagged["roots_on_weight"]
+        assert forest["pairwise_agreement"] is not None
+        assert bagged["mean_strength"] is not None
+        assert len(forest["member_strengths"]) == 25
+
+    def test_the_lottery_offers_the_asked_number_and_sometimes_denies_the_best(
+        self,
+    ) -> None:
+        body = client.post(
+            LOTTERY, json={"points": TANGLED, "max_features": 1, "n_draws": 20}
+        ).json()
+
+        assert len(body["board"]) == 2
+        assert all(len(draw["offered"]) == 1 for draw in body["draws"])
+        assert any(draw["best_denied"] for draw in body["draws"])
+        for draw in body["draws"]:
+            assert draw["winner"] in draw["offered"]
+
+    def test_offering_every_feature_never_denies_the_best(self) -> None:
+        body = client.post(
+            LOTTERY, json={"points": TANGLED, "max_features": 2, "n_draws": 5}
+        ).json()
+
+        assert not any(draw["best_denied"] for draw in body["draws"])
+        assert all(
+            draw["winner"]
+            == max(body["board"], key=lambda each: each["gain"])["feature"]
+            for draw in body["draws"]
+        )
+
+    def test_the_same_sample_can_grow_different_trees(self) -> None:
+        body = client.post(
+            SAME_SAMPLE, json={"points": TANGLED, "seeds": [1, 2, 3, 4]}
+        ).json()
+
+        assert sum(body["multiplicities"]) == len(TANGLED)
+        roots = {
+            (tree["root_feature"], tree["root_threshold"]) for tree in body["trees"]
+        }
+        assert len(roots) > 1
+        assert 0 <= body["agreement"] <= 1
+
+    def test_seeds_give_a_spread_rather_than_one_verdict(self) -> None:
+        body = client.post(
+            SEEDS, json={"points": TANGLED, "n_seeds": 4, "n_members": 15}
+        ).json()
+
+        assert len(body["results"]) == 4
+        assert len({each["forest_roots_on_height"] for each in body["results"]}) > 1
+
+    def test_the_worlds_are_swept_over_every_feature_count(self) -> None:
+        body = client.get(WORLDS).json()
+
+        assert [world["name"] for world in body["worlds"]] == ["sparse", "shared"]
+        for world in body["worlds"]:
+            assert [point["max_features"] for point in world["sweep"]] == [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+            ]
+
+
+class TestSplitCompetition:
+    def test_every_sample_holds_a_board_and_the_wins_add_up(self) -> None:
+        body = client.post(COMPETITION, json={"points": TANGLED, "n_samples": 8}).json()
+
+        assert len(body["samples"]) == 8
+        for sample in body["samples"]:
+            assert {each["feature"] for each in sample["board"]} == {"height", "weight"}
+            assert (
+                sample["winner"]
+                == max(sample["board"], key=lambda each: each["gain"])["feature"]
+            )
+            assert 0 < sample["distinct_rows"] <= len(TANGLED)
+        assert body["wins"]["height"] + body["wins"]["weight"] == 8
+
+    def test_the_boards_differ_between_samples(self) -> None:
+        body = client.post(COMPETITION, json={"points": TANGLED, "n_samples": 8}).json()
+        gains = {
+            tuple(round(each["gain"], 6) for each in sample["board"])
+            for sample in body["samples"]
+        }
+        assert len(gains) > 1

@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from oop_ml.core.exceptions import MLLibError
 
@@ -49,6 +50,29 @@ def install_error_handling(app: FastAPI) -> None:
                 "error": type(error).__name__,
                 "detail": str(error),
             },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(
+        request: Request, error: RequestValidationError
+    ) -> JSONResponse:
+        """A request the models refused before any computing: the values themselves.
+
+        FastAPI's own handler answers this case too, but it echoes the offending
+        input back, and an input holding ``NaN`` or an infinity cannot be
+        written as JSON, so the echo itself failed and the learner saw a 500 for
+        what was a 422. This handler answers with the location and the message
+        and never the value, in one readable string, which is what the website
+        shows.
+        """
+        detail = "; ".join(
+            f"{' '.join(str(part) for part in entry['loc'] if part != 'body')} "
+            f"{entry['msg']}".strip()
+            for entry in error.errors()
+        )
+        return JSONResponse(
+            status_code=422,
+            content={"error": "ValidationError", "detail": detail},
         )
 
     @app.exception_handler(Exception)

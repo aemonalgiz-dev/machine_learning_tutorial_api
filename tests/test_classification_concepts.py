@@ -7,6 +7,8 @@ question, is height below 151.5. The logistic page reads a boundary near 4.24
 hours off a fixed overlapping class. All of that is pinned here.
 """
 
+import math
+from itertools import pairwise
 from typing import ClassVar
 
 from fastapi.testclient import TestClient
@@ -316,3 +318,328 @@ class TestTreeWalk:
         assert leaf is not None
         assert leaf["kind"] == "answer"
         assert leaf["label"] == body["prediction"]
+
+
+EVALUATE = "/concepts/logistic-regression/evaluate"
+LOGISTIC_WALK = "/concepts/logistic-regression/walk"
+
+
+class TestLogisticEvaluate:
+    def _fitted(self) -> dict:
+        return client.post(
+            LOGISTIC, json={"points": OUTCOMES, "learning_rate": 0.5}
+        ).json()
+
+    def test_the_fit_reports_its_own_convergence(self) -> None:
+        body = self._fitted()
+
+        assert body["converged"] is True
+        assert body["epochs_run"] < 10_000
+        assert abs(body["odds_multiplier"] - math.exp(body["slope"])) < 1e-9
+        assert abs(body["log_loss"] + body["log_likelihood"] / len(OUTCOMES)) < 1e-12
+
+    def test_the_straight_line_leaves_the_probability_band(self) -> None:
+        line = self._fitted()["straight_line"]
+        at_one_hour = line["intercept"] + line["slope"] * 1
+        at_eight_hours = line["intercept"] + line["slope"] * 8
+
+        assert at_one_hour < 0
+        assert at_eight_hours > 1
+
+    def test_the_fitted_curve_scores_the_same_through_evaluate(self) -> None:
+        fitted = self._fitted()
+        body = client.post(
+            EVALUATE,
+            json={
+                "points": OUTCOMES,
+                "slope": fitted["slope"],
+                "intercept": fitted["intercept"],
+            },
+        ).json()
+
+        assert abs(body["accuracy"] - fitted["accuracy"]) < 1e-12
+        assert abs(body["log_loss"] - fitted["log_loss"]) < 1e-9
+        assert abs(body["gap_total"]) < 1e-3
+        assert abs(body["weighted_gap_total"]) < 1e-2
+
+    def test_lowering_the_threshold_changes_the_decisions_without_refitting(
+        self,
+    ) -> None:
+        fitted = self._fitted()
+        at_half = client.post(
+            EVALUATE,
+            json={
+                "points": OUTCOMES,
+                "slope": fitted["slope"],
+                "intercept": fitted["intercept"],
+                "threshold": 0.5,
+            },
+        ).json()
+        at_three_tenths = client.post(
+            EVALUATE,
+            json={
+                "points": OUTCOMES,
+                "slope": fitted["slope"],
+                "intercept": fitted["intercept"],
+                "threshold": 0.3,
+            },
+        ).json()
+
+        assert at_half["accuracy"] < at_three_tenths["accuracy"]
+        assert at_half["log_loss"] == at_three_tenths["log_loss"]
+        assert at_three_tenths["boundary"] < at_half["boundary"]
+        assert (
+            at_three_tenths["confusion"]["false_negatives"]
+            < at_half["confusion"]["false_negatives"]
+        )
+
+    def test_a_flatter_curve_makes_the_same_decisions_at_a_worse_loss(self) -> None:
+        fitted = self._fitted()
+        sharp = client.post(
+            EVALUATE,
+            json={
+                "points": OUTCOMES,
+                "slope": fitted["slope"],
+                "intercept": fitted["intercept"],
+            },
+        ).json()
+        flat = client.post(
+            EVALUATE,
+            json={
+                "points": OUTCOMES,
+                "slope": fitted["slope"] / 2,
+                "intercept": fitted["intercept"] / 2,
+            },
+        ).json()
+
+        assert [each["predicted"] for each in sharp["outcomes"]] == [
+            each["predicted"] for each in flat["outcomes"]
+        ]
+        assert flat["log_loss"] > sharp["log_loss"]
+
+
+class TestLogisticWalk:
+    def test_the_climb_lowers_the_loss_and_records_every_pass(self) -> None:
+        body = client.post(
+            LOGISTIC_WALK,
+            json={"points": OUTCOMES, "learning_rate": 0.5, "max_epochs": 100},
+        ).json()
+
+        assert len(body["passes"]) == 100
+        # A bold first stride at this rate overshoots, so the first pass can
+        # sit above the start; the climb as a whole still comes down.
+        assert body["passes"][-1]["log_loss"] < body["start_log_loss"]
+        assert body["passes"][-1]["log_loss"] < body["passes"][0]["log_loss"]
+        assert abs(body["start_log_loss"] - math.log(2)) < 1e-12
+
+    def test_separated_classes_keep_steepening_after_accuracy_is_perfect(self) -> None:
+        separated = [{"x": x, "label": 0} for x in (1, 1.5, 2, 2.5, 3, 3.5)] + [
+            {"x": x, "label": 1} for x in (5.5, 6, 6.5, 7, 7.5, 8)
+        ]
+        body = client.post(
+            LOGISTIC_WALK,
+            json={"points": separated, "learning_rate": 0.5, "max_epochs": 1000},
+        ).json()
+
+        first_perfect = next(each for each in body["passes"] if each["accuracy"] == 1.0)
+        last = body["passes"][-1]
+        assert last["slope"] > first_perfect["slope"] * 2
+        assert last["log_loss"] < first_perfect["log_loss"]
+        assert body["converged"] is False
+
+    def test_the_lattice_holds_the_start_and_the_end(self) -> None:
+        body = client.post(
+            LOGISTIC_WALK,
+            json={"points": OUTCOMES, "learning_rate": 0.5, "max_epochs": 50},
+        ).json()
+
+        assert body["intercept_axis"][0] <= 0 <= body["intercept_axis"][-1]
+        assert body["slope_axis"][0] <= 0 <= body["slope_axis"][-1]
+        assert (
+            body["intercept_axis"][0]
+            <= body["passes"][-1]["intercept"]
+            <= body["intercept_axis"][-1]
+        )
+        assert (
+            body["slope_axis"][0]
+            <= body["passes"][-1]["slope"]
+            <= body["slope_axis"][-1]
+        )
+
+
+SPLIT_INSPECTOR = "/concepts/decision-trees/split-inspector"
+GROWTH = "/concepts/decision-trees/growth"
+DEPTH_SWEEP = "/concepts/decision-trees/depth-sweep"
+VERSUS_LOGISTIC = "/concepts/decision-trees/versus-logistic"
+
+TREE_CROWD = [
+    {"x": 147, "y": 41, "label": 0},
+    {"x": 156, "y": 53, "label": 1},
+    {"x": 145, "y": 57, "label": 0},
+    {"x": 159, "y": 57, "label": 1},
+    {"x": 162, "y": 61, "label": 1},
+    {"x": 120, "y": 25, "label": 0},
+    {"x": 122, "y": 28, "label": 0},
+    {"x": 118, "y": 24, "label": 0},
+    {"x": 180, "y": 80, "label": 1},
+    {"x": 183, "y": 83, "label": 1},
+    {"x": 178, "y": 78, "label": 1},
+]
+
+MUDDLED_CROWD = TREE_CROWD + [
+    {"x": 145, "y": 45, "label": 0},
+    {"x": 145, "y": 55, "label": 1},
+    {"x": 151, "y": 45, "label": 1},
+    {"x": 151, "y": 55, "label": 0},
+    {"x": 157, "y": 45, "label": 0},
+    {"x": 157, "y": 55, "label": 1},
+    {"x": 148, "y": 50, "label": 1},
+    {"x": 154, "y": 50, "label": 0},
+    {"x": 160, "y": 50, "label": 1},
+    {"x": 147, "y": 58, "label": 0},
+    {"x": 153, "y": 58, "label": 1},
+    {"x": 150, "y": 42, "label": 1},
+    {"x": 156, "y": 42, "label": 0},
+    {"x": 143, "y": 50, "label": 0},
+]
+
+
+class TestSplitInspector:
+    def test_the_winning_question_scores_the_whole_root_impurity(self) -> None:
+        body = client.post(
+            SPLIT_INSPECTOR,
+            json={"points": TREE_CROWD, "feature": "height", "threshold": 151.5},
+        ).json()
+
+        assert abs(body["parent"]["gini"] - 60 / 121) < 1e-12
+        assert body["left"]["gini"] == 0.0
+        assert body["right"]["gini"] == 0.0
+        assert abs(body["gain"] - 60 / 121) < 1e-12
+        assert body["left"]["children"] == 5 and body["right"]["adults"] == 6
+
+    def test_a_poor_question_earns_little(self) -> None:
+        body = client.post(
+            SPLIT_INSPECTOR,
+            json={"points": TREE_CROWD, "feature": "height", "threshold": 121},
+        ).json()
+
+        assert body["left"]["n_samples"] == 2
+        assert body["right"]["children"] == 3 and body["right"]["adults"] == 6
+        assert abs(body["right"]["gini"] - (1 - (3 / 9) ** 2 - (6 / 9) ** 2)) < 1e-12
+        assert 0 < body["gain"] < 0.2
+
+    def test_the_candidates_sit_between_distinct_values(self) -> None:
+        body = client.post(
+            SPLIT_INSPECTOR,
+            json={"points": TREE_CROWD, "feature": "height", "threshold": 151.5},
+        ).json()
+
+        assert 151.5 in body["candidates"]
+        assert len(body["candidates"]) == 10
+        assert body["candidates"] == sorted(body["candidates"])
+
+
+class TestGrowth:
+    def test_the_clean_crowd_grows_one_split(self) -> None:
+        body = client.post(GROWTH, json={"points": TREE_CROWD}).json()
+
+        assert body["n_splits"] == 1
+        assert body["n_leaves"] == 2
+        root = body["nodes"][0]
+        assert root["feature"] == "height" and abs(root["threshold"] - 151.5) < 1e-9
+        assert abs(root["gain"] - 60 / 121) < 1e-9
+        assert body["nodes"][root["left_id"]]["children"] == 5
+        assert body["nodes"][root["right_id"]]["adults"] == 6
+
+    def test_every_leaf_owns_a_rectangle_inside_the_window(self) -> None:
+        body = client.post(
+            GROWTH, json={"points": MUDDLED_CROWD, "max_depth": 3}
+        ).json()
+
+        for node in body["nodes"]:
+            x_low, x_high, y_low, y_high = node["bounds"]
+            assert body["x_min"] <= x_low < x_high <= body["x_max"]
+            assert body["y_min"] <= y_low < y_high <= body["y_max"]
+        leaves = [node for node in body["nodes"] if node["split_order"] is None]
+        assert len(leaves) == body["n_leaves"]
+        assert sum(node["children"] + node["adults"] for node in leaves) == len(
+            MUDDLED_CROWD
+        )
+
+    def test_a_leaf_minimum_holds_growth_back(self) -> None:
+        free = client.post(
+            GROWTH, json={"points": MUDDLED_CROWD, "max_depth": 6}
+        ).json()
+        held = client.post(
+            GROWTH,
+            json={"points": MUDDLED_CROWD, "max_depth": 6, "min_samples_leaf": 4},
+        ).json()
+
+        assert held["n_leaves"] < free["n_leaves"]
+        assert all(
+            node["children"] + node["adults"] >= 4
+            for node in held["nodes"]
+            if node["split_order"] is None
+        )
+
+
+class TestDepthSweep:
+    def test_training_accuracy_never_falls_with_depth(self) -> None:
+        body = client.post(
+            DEPTH_SWEEP, json={"points": MUDDLED_CROWD, "max_depth": 6}
+        ).json()
+
+        train = [each["train_accuracy"] for each in body["scores"]]
+        assert all(later >= earlier - 1e-12 for earlier, later in pairwise(train))
+        assert len(body["held_out_indices"]) == int(len(MUDDLED_CROWD) * 0.3)
+
+    def test_the_held_out_score_stops_climbing_before_the_training_score(self) -> None:
+        body = client.post(
+            DEPTH_SWEEP, json={"points": MUDDLED_CROWD, "max_depth": 6}
+        ).json()
+
+        held = [each["held_out_accuracy"] for each in body["scores"]]
+        train = [each["train_accuracy"] for each in body["scores"]]
+        assert train[-1] > held[-1]
+
+
+class TestVersusLogistic:
+    def test_both_models_map_the_same_window(self) -> None:
+        body = client.post(
+            VERSUS_LOGISTIC, json={"points": TREE_CROWD, "max_depth": 2}
+        ).json()
+
+        assert body["tree_regions"]["cells"] == body["logistic_regions"]["cells"]
+        assert body["tree_regions"]["x_min"] == body["logistic_regions"]["x_min"]
+        assert body["tree_accuracy"] == 1.0
+        assert body["logistic_accuracy"] == 1.0
+
+
+class TestRootWithNothingToGain:
+    XOR_CROWD: ClassVar[list[dict]] = [
+        {"x": 130, "y": 30, "label": 0},
+        {"x": 135, "y": 35, "label": 0},
+        {"x": 170, "y": 70, "label": 0},
+        {"x": 175, "y": 75, "label": 0},
+        {"x": 130, "y": 70, "label": 1},
+        {"x": 135, "y": 75, "label": 1},
+        {"x": 170, "y": 30, "label": 1},
+        {"x": 175, "y": 35, "label": 1},
+    ]
+
+    def test_no_root_question_earns_anything_on_a_crossed_crowd(self) -> None:
+        body = client.post(
+            "/concepts/decision-trees/root-candidates", json={"points": self.XOR_CROWD}
+        ).json()
+
+        assert body["best_feature"] is None
+        assert max(each["gain"] for each in body["candidates"]) < 1e-12
+
+    def test_the_tree_then_stays_a_single_leaf(self) -> None:
+        body = client.post(
+            GROWTH, json={"points": self.XOR_CROWD, "max_depth": 3}
+        ).json()
+
+        assert body["n_splits"] == 0
+        assert body["n_leaves"] == 1
+        assert body["accuracy"] == 0.5
