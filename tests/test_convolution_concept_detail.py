@@ -8,8 +8,9 @@ any data arrives, the backward pass checked against a central difference of
 the loss, what the sweep costs, and every refusal the last part quotes.
 
 Two of those are pinned as orderings rather than as figures. The cost endpoint
-times whichever machine ran it, so what is asserted is that the sweep is the
-slower of the two and that the arrangement is right, not the milliseconds. And
+times whichever machine ran it, so what is asserted is which of the three
+passes is quicker at which size, that the loops and the sweep agree, and that
+the arrangement is right, not the milliseconds. And
 the gradient check is asserted against a tolerance rather than a value,
 because a central difference agrees with an exact slope to about the square of
 its step and not to a fixed number of digits.
@@ -363,13 +364,17 @@ class TestTheBackwardPassAgainstFiniteDifferences:
         assert [check["n_checked"] for check in body["checks"]] == [70, 70, 182]
 
     def test_the_worst_gap_and_the_largest_slope_the_page_quotes(self) -> None:
-        # The page says the worst disagreement anywhere was about 5e-09
-        # against reported slopes as large as 13.9. Both are deterministic,
-        # since every fixture is drawn under a fixed seed.
+        # The page says the worst disagreement anywhere was 7.8e-09, on the
+        # padded fixture's inputs, against reported slopes as large as 13.9.
+        # Both are deterministic, since every fixture is drawn under a fixed
+        # seed; the gap moved from 5.3e-09 when the sweep became a contraction,
+        # because the losses are summed in another order and the difference
+        # divides that rounding by twice the step.
         body = get(BACKWARD)
         padded = body["checks"][1]
 
-        assert body["largest_gap_anywhere"] == pytest.approx(5.3e-09, rel=0.1)
+        assert body["largest_gap_anywhere"] == pytest.approx(7.8e-09, rel=0.1)
+        assert padded["largest_input_gap"] == body["largest_gap_anywhere"]
         assert padded["largest_true_slope"] == pytest.approx(13.87, abs=0.01)
 
 
@@ -384,16 +389,54 @@ class TestWhatTheSweepCosts:
             [8, 26, 26],
         ]
 
-    def test_the_sweep_is_the_slower_of_the_two_at_every_size(self) -> None:
+    def test_each_pass_adds_up_one_product_per_kernel_entry_per_answer(self) -> None:
         body = get(COST)
 
-        for row in body["rows"]:
-            assert row["sweep_milliseconds"] > row["dense_milliseconds"]
-            # The page says the sweep came out between about nineteen and
-            # sixty-five times slower on the runs behind it, and says that the
-            # figure moves between runs, so what is pinned here is only that
-            # the gap is an order of magnitude rather than a rounding step.
-            assert row["ratio"] > 5.0
+        assert [row["n_terms"] for row in body["rows"]] == [324, 5184, 48672]
+
+    def test_the_loops_and_the_sweep_give_the_same_answer_at_every_size(
+        self,
+    ) -> None:
+        # Deterministic, since every draw is seeded. The page quotes the
+        # worst of the three, which is a few rounding steps and no more.
+        body = get(COST)
+
+        assert [row["largest_disagreement"] for row in body["rows"]] == [
+            pytest.approx(2.2e-16, rel=0.1),
+            pytest.approx(8.9e-16, rel=0.1),
+            pytest.approx(1.8e-15, rel=0.1),
+        ]
+        assert body["largest_disagreement_anywhere"] < 1e-12
+
+    def test_the_loops_fall_further_behind_the_sweep_as_the_picture_grows(
+        self,
+    ) -> None:
+        # Timings, so orderings rather than figures. On the page's own
+        # picture the loops and the sweep are within a few times of each
+        # other, since there are only 324 products and the sweep's fixed
+        # overhead is most of its time; at 28 by 28 through eight filters the
+        # loops took over a hundred times as long on every run behind the
+        # page, so ten is a floor no ordinary run comes near.
+        rows = get(COST)["rows"]
+
+        assert rows[1]["loop_milliseconds"] > rows[1]["sweep_milliseconds"]
+        assert rows[2]["loop_over_sweep"] > 10.0
+        assert rows[2]["loop_over_sweep"] > rows[0]["loop_over_sweep"]
+
+    def test_the_sweep_is_slower_than_the_dense_layer_small_and_quicker_large(
+        self,
+    ) -> None:
+        # On the page's picture a dense layer of 2,340 parameters is one small
+        # matrix multiply and the sweep's fixed overhead dominates, so the
+        # sweep is several times slower. At 28 by 28 through eight filters the
+        # dense layer multiplies 4,245,280 weights and the sweep a view of
+        # 48,672 products, and the order reverses. The ratio falls between
+        # the middle size and the largest on every run behind the page.
+        rows = get(COST)["rows"]
+
+        assert rows[0]["ratio"] > 1.0
+        assert rows[2]["ratio"] < 1.0
+        assert rows[1]["ratio"] > rows[2]["ratio"]
 
     def test_and_holds_far_fewer_parameters_at_every_size(self) -> None:
         body = get(COST)

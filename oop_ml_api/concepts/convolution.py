@@ -64,12 +64,21 @@ the accumulation can be checked by hand. And it checks the whole backward pass
 against a central difference of the loss on three fixtures, plain, padded and
 strided, over the kernels, the biases and the inputs alike.
 
-The cost endpoint times the sweep against the dense layer of equal width at
-three sizes. The library's convolution is seven nested loops on purpose, so it
-is slow, and the page says so with the figures rather than around them. Those
-figures are a measurement of whichever machine served the request and move a
-little between runs, which is why the tests pin the ordering and the
-arrangement rather than the milliseconds.
+The cost endpoint times three forward passes at three sizes. The first is the
+library's convolution, which lays every window out as a view of the padded
+picture and sums over channels and kernel positions in one contraction. The
+second is the definition written as seven nested loops, held in this module
+and sharing nothing with the layer but the numbers, and its answer is compared
+with the layer's, which agree to 1.8e-15 at the largest size. The third is the
+dense layer of equal width. The sweep's time barely moves between the page's
+picture and the library's own example, because at these sizes its fixed
+overhead is most of it, while the loops grow with the 324, 5,184 and 48,672
+products they add up and the dense layer with its weights. So the sweep is
+several times slower than the dense layer on the page's picture and several
+times quicker at 28 by 28 through eight filters. Those figures are a
+measurement of whichever machine served the request and move between runs,
+which is why the tests pin the orderings, the agreement and the arrangement
+rather than the milliseconds.
 
 The edge-case endpoint probes every refusal the page's last part quotes,
 including the join a stack refuses when a convolution is placed directly
@@ -1228,13 +1237,64 @@ def _worst_difference(
     return worst
 
 
-class CostRow(BaseModel):
-    """One size, timed both ways.
+def _definitional_sweep(
+    picture: np.ndarray,
+    kernels: np.ndarray,
+    biases: np.ndarray,
+    stride: int,
+    padding: int,
+) -> np.ndarray:
+    """The forward pass as its definition reads, one term at a time.
 
-    ``sweep_milliseconds`` and ``dense_milliseconds`` are the median of
-    ``COST_REPEATS`` forward passes over a single picture, and ``ratio`` is the
-    first over the second. Both are a measurement of the machine that served
-    the request rather than a property of the arrangement.
+    Seven nested loops, over the rows of the block, the filters, the two
+    output axes, the channels and the two kernel axes, with no view and no
+    contraction anywhere, so that it shares nothing with the layer but the
+    numbers it is handed. It is written here from the definition rather than
+    taken from anywhere else, and it exists for the cost endpoint to time
+    beside the layer and to check the layer's answer against.
+    """
+    n_rows, channels, height, width = picture.shape
+    n_filters, _, side, _ = kernels.shape
+    bordered = np.pad(picture, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
+    out_height = (height - side + 2 * padding) // stride + 1
+    out_width = (width - side + 2 * padding) // stride + 1
+    answers = np.zeros((n_rows, n_filters, out_height, out_width))
+    for row in range(n_rows):
+        for filter_index in range(n_filters):
+            for out_row in range(out_height):
+                for out_column in range(out_width):
+                    total = float(biases[filter_index])
+                    for channel in range(channels):
+                        for kernel_row in range(side):
+                            for kernel_column in range(side):
+                                total += float(
+                                    kernels[
+                                        filter_index, channel, kernel_row, kernel_column
+                                    ]
+                                    * bordered[
+                                        row,
+                                        channel,
+                                        out_row * stride + kernel_row,
+                                        out_column * stride + kernel_column,
+                                    ]
+                                )
+                    answers[row, filter_index, out_row, out_column] = total
+    return answers
+
+
+class CostRow(BaseModel):
+    """One size, timed three ways.
+
+    ``sweep_milliseconds``, ``loop_milliseconds`` and ``dense_milliseconds``
+    are each the median of ``COST_REPEATS`` forward passes over a single
+    picture, through the layer, through the seven loops of the definition,
+    and through a dense layer reading and answering the same numbers. ``ratio``
+    is the sweep over the dense layer, so below one means the sweep was the
+    quicker, and ``loop_over_sweep`` is the loops over the sweep. ``n_terms``
+    is how many products one pass adds up, and ``largest_disagreement`` is the
+    worst gap between the loops' answer and the layer's. The times are a
+    measurement of the machine that served the request rather than a property
+    of the arrangement; the disagreement is not.
     """
 
     side: int
@@ -1242,11 +1302,15 @@ class CostRow(BaseModel):
     answers: list[int]
     n_inputs: int
     n_outputs: int
+    n_terms: int
     convolution_parameters: int
     dense_parameters: int
     sweep_milliseconds: float
+    loop_milliseconds: float
     dense_milliseconds: float
     ratio: float
+    loop_over_sweep: float
+    largest_disagreement: float
 
 
 class CostResponse(BaseModel):
@@ -1254,20 +1318,31 @@ class CostResponse(BaseModel):
 
     repeats: int
     rows: list[CostRow]
+    largest_disagreement_anywhere: float
 
 
 @router.get("/concepts/convolution/cost", response_model=CostResponse)
 def cost() -> CostResponse:
-    """Time the sweep against the dense layer of equal width, at three sizes."""
+    """Time the sweep against its own definition and a dense layer, at three sizes."""
+    rows = [_cost_row(side, n_filters) for side, n_filters in COST_SIZES]
     return CostResponse(
         repeats=COST_REPEATS,
-        rows=[_cost_row(side, n_filters) for side, n_filters in COST_SIZES],
+        rows=rows,
+        largest_disagreement_anywhere=max(row.largest_disagreement for row in rows),
     )
 
 
 def _cost_row(side: int, n_filters: int) -> CostRow:
-    """One size, both layers built and both forward passes timed."""
-    layer = _sweeping_layer(picture_side=side, n_filters=n_filters)
+    """One size, all three built and all three forward passes timed.
+
+    The layer is given drawn biases in place of its starting zeros, so that a
+    sweep which forgot the bias could not agree with the loops by accident.
+    """
+    generator = np.random.default_rng(FIXED_SEED)
+    unbiased = _sweeping_layer(picture_side=side, n_filters=n_filters)
+    layer = unbiased.with_parameters(
+        unbiased.kernels, generator.normal(size=unbiased.bias_vector.shape)
+    )
     n_inputs = int(layer.shape.n_inputs)
     n_outputs = int(layer.shape.n_outputs)
 
@@ -1276,11 +1351,21 @@ def _cost_row(side: int, n_filters: int) -> CostRow:
     ) / np.sqrt(n_inputs)
     equal_width = _dense_of(weights)
 
-    picture = np.random.default_rng(FIXED_SEED).normal(size=(1, CHANNELS, side, side))
+    picture = generator.normal(size=(1, CHANNELS, side, side))
     row = picture.reshape(1, n_inputs)
+    kernels = np.asarray(layer.kernels, dtype=np.float64)
+    biases = np.asarray(layer.bias_vector, dtype=np.float64)
+
+    def by_definition() -> np.ndarray:
+        return _definitional_sweep(
+            picture, kernels, biases, layer.stride, layer.padding
+        )
 
     sweep_time = _median_time(lambda: layer.respond_to(picture))
+    loop_time = _median_time(by_definition)
     dense_time = _median_time(lambda: equal_width.respond_to(row))
+
+    swept = np.asarray(layer.respond_to(picture).outputs, dtype=np.float64)
 
     return CostRow(
         side=side,
@@ -1288,11 +1373,15 @@ def _cost_row(side: int, n_filters: int) -> CostRow:
         answers=[int(extent) for extent in layer.shape.answers],
         n_inputs=n_inputs,
         n_outputs=n_outputs,
-        convolution_parameters=int(layer.kernels.size + layer.bias_vector.size),
+        n_terms=int(n_outputs * kernels[0].size),
+        convolution_parameters=int(kernels.size + biases.size),
         dense_parameters=int(weights.size + n_outputs),
         sweep_milliseconds=sweep_time * 1000.0,
+        loop_milliseconds=loop_time * 1000.0,
         dense_milliseconds=dense_time * 1000.0,
         ratio=sweep_time / dense_time,
+        loop_over_sweep=loop_time / sweep_time,
+        largest_disagreement=float(np.max(np.abs(swept - by_definition()))),
     )
 
 

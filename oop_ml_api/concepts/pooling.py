@@ -15,10 +15,11 @@ average shows four quarters.
 
 The answer also lists every window the layer swept, where it sat, what it
 answered, which position won it under a maximum, and what the shares inside
-it add up to. Those shares come from the layer's own ``shares_of``, the method
-its backward pass calls on the same view of the same picture, so a winner
-named here is the winner the layer routed the slope to and not a second
-reading of the geometry made in this module.
+it add up to. Those shares come from the layer's own ``shares_of``, which is
+``shares_in_each``, the function its backward pass asks of every window at
+once, asked about a stack of one, so a winner named here is the winner the
+layer routed the slope to and not a second reading of the geometry made in
+this module.
 
 The share-totals endpoint exists for one figure. An average's shares are
 ``1 / n`` each and there are ``n`` of them, and in float64 that adds up to one
@@ -268,9 +269,10 @@ def _swept_windows(
     """Every window the layer swept, read back through its own ``shares_of``.
 
     The corner of each window is the output position times the stride, which
-    is the layer's own sweep, and the shares come from the method its backward
-    pass calls on the same view, so the winner reported here is the winner
-    that received the slope.
+    is the layer's own sweep, and the shares come from the function its
+    backward pass applies to the whole stack of windows at once, here asked
+    about one window, so the winner reported here is the winner that received
+    the slope.
     """
     windows: list[SweptWindow] = []
     for output_row in range(pooled.shape[0]):
