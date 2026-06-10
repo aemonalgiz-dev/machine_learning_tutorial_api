@@ -9,11 +9,14 @@ in it lives in a concept module. This file only assembles them.
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from oop_ml_api.concepts import (
+    a_vector_for_a_picture,
     backpropagation,
     byte_pair_encoding,
     bytes_and_characters,
@@ -50,8 +53,10 @@ from oop_ml_api.concepts import (
     kernel_trick,
     keypoints_and_descriptors,
     latent_semantic_analysis,
+    learning_the_metric,
     logistic_regression,
     loss_functions,
+    markov_chains,
     maximum_matching,
     morfessor,
     moses_words,
@@ -74,6 +79,7 @@ from oop_ml_api.concepts import (
     principal_components,
     random_indexing,
     restricted_boltzmann_machine,
+    searching_pictures,
     self_organising_map,
     sentencepiece,
     shapes,
@@ -83,6 +89,7 @@ from oop_ml_api.concepts import (
     token_basics,
     training_a_network,
     treebank_words,
+    u_net,
     unicode_words,
     unigram_model,
     unsupervised,
@@ -95,6 +102,7 @@ from oop_ml_api.concepts import (
 )
 from oop_ml_api.errors import install_error_handling
 from oop_ml_api.primers import calculus, linear_algebra, statistics
+from oop_ml_api.warmup import warm_in_background, warming_enabled
 
 CONCEPT_ROUTERS = (
     simple_linear_regression.router,
@@ -175,6 +183,11 @@ CONCEPT_ROUTERS = (
     word_lattice.router,
     word_vectors.router,
     wordpiece.router,
+    markov_chains.router,
+    u_net.router,
+    a_vector_for_a_picture.router,
+    learning_the_metric.router,
+    searching_pictures.router,
 )
 """Every concept the API serves. Adding one is appending its router here."""
 
@@ -198,12 +211,25 @@ def allowed_origins() -> list[str]:
     return ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 
+@asynccontextmanager
+async def _warmed_on_start(app: FastAPI) -> AsyncIterator[None]:
+    """Start computing the slow fixed answers, then serve without waiting.
+
+    Runs only when the server starts. The tests build their client without
+    entering it, so none of them pays for this.
+    """
+    if warming_enabled():
+        warm_in_background(app)
+    yield
+
+
 def create_app() -> FastAPI:
     """Build the application. A factory so tests get a fresh instance."""
     app = FastAPI(
         title="oop_ml teaching API",
         version="0.1.0",
         summary="Small numeric inputs in, fitted models out, for the teaching site.",
+        lifespan=_warmed_on_start,
     )
 
     app.add_middleware(
