@@ -36,6 +36,7 @@ from typing import Literal
 
 import numpy as np
 from fastapi import APIRouter
+from oop_ml import Feature, PrincipalComponentAnalysis
 from oop_ml.core.natural_language_processing.embeddings.cooccurrence import (
     CooccurrenceMatrix,
 )
@@ -60,6 +61,8 @@ from oop_ml.core.natural_language_processing.tokenization.word_level.whitespace 
     WhitespacePreTokenizer,
 )
 from pydantic import BaseModel, Field
+
+from oop_ml_api.alice_corpus import SENTENCES as BOOK_SENTENCES
 
 router = APIRouter(prefix="/concepts/word2vec", tags=["word2vec"])
 
@@ -1174,3 +1177,184 @@ def _rare_word() -> RareWordResponse:
 def rare_word() -> RareWordResponse:
     """A word seen twice and a word seen many times, across four starts."""
     return _rare_word()
+
+
+# --------------------------------------------------------------------------
+# The space itself, on a real book, projected to three dimensions.
+# --------------------------------------------------------------------------
+
+BOOK_MINIMUM_COUNT = 3
+"""A word the book uses fewer times than this is dropped before counting.
+
+Every real fit does this, and here it is also what brings the vocabulary to a
+few hundred, which is the size at which the table's shape stops being an
+assertion and becomes something a reader can see.
+"""
+
+BOOK_WINDOW = 3
+"""The same reach the hand-built corpus is counted with, so the two compare."""
+
+BOOK_DIMENSION = 24
+"""How many numbers the learned vectors get. Wider than the toy's twelve,
+because there are more words to keep apart."""
+
+BOOK_EPOCHS = 5
+"""Enough passes to separate the book's words, and few enough to fit live."""
+
+N_DRAWN = 90
+"""How many words the picture carries.
+
+The commonest ones. Three hundred and sixty four labels is not a picture, it
+is a fog, and the words a reader recognises are the frequent ones anyway. The
+projection is fitted on every word and only the drawing is a subset, so the
+directions are the book's rather than the subset's.
+"""
+
+
+class PlacedWord(BaseModel):
+    """One word as a direction, projected to something drawable."""
+
+    word: str
+    count: int
+    x: float
+    y: float
+    z: float
+
+
+class SpaceProjection(BaseModel):
+    """One description of the book's words, placed on a sphere.
+
+    ``kept_share`` is how much of the spread the three drawn directions hold,
+    so the picture can say what it is throwing away instead of implying it
+    drew everything.
+    """
+
+    name: str
+    width: int
+    kept_share: float
+    words: list[PlacedWord]
+
+
+class BookSpaceResponse(BaseModel):
+    """The same words described two ways, and what the counting table costs."""
+
+    corpus: str
+    n_sentences: int
+    n_tokens: int
+    n_distinct: int
+    minimum_count: int
+    window: int
+    n_words: int
+    n_cells: int
+    n_zero_cells: int
+    zero_share: float
+    toy_n_words: int
+    toy_n_cells: int
+    toy_zero_share: float
+    counted: SpaceProjection
+    learned: SpaceProjection
+
+
+def _on_a_sphere(rows: np.ndarray) -> tuple[np.ndarray, float]:
+    """Unit directions projected to three dimensions, back onto the sphere.
+
+    Cosine reads a direction and throws a length away, so the length goes
+    first and the sphere is what is left. The projection is the library's own
+    principal components over every word.
+    """
+    lengths = np.linalg.norm(rows, axis=1, keepdims=True)
+    directions = rows / np.where(lengths == 0.0, 1.0, lengths)
+    columns = [
+        Feature(f"coordinate_{position}", directions[:, position])
+        for position in range(directions.shape[1])
+    ]
+    analysis = PrincipalComponentAnalysis(n_components=3).fit(columns)
+    placed = np.column_stack(
+        [
+            np.asarray(component.values, dtype=np.float64)
+            for component in analysis.transform(columns)
+        ]
+    )
+    radius = np.linalg.norm(placed, axis=1, keepdims=True)
+    placed = placed / np.where(radius == 0.0, 1.0, radius)
+    return placed, float(sum(analysis.components.variance_shares))
+
+
+@cache
+def _book_space() -> BookSpaceResponse:
+    tokenised = TokenisedCorpus.from_texts(BOOK_SENTENCES, WhitespacePreTokenizer())
+    vocabulary = tokenised.vocabulary(BOOK_MINIMUM_COUNT)
+    sequences = tokenised.id_sequences(vocabulary)
+    matrix = CooccurrenceMatrix.from_id_sequences(
+        vocabulary, sequences, window=BOOK_WINDOW
+    )
+    counts = np.asarray(matrix.counts, dtype=np.float64)
+
+    occurrences = tokenised.word_counts
+    words = [vocabulary.token_of(position) for position in range(counts.shape[0])]
+    drawn = sorted(
+        range(len(words)), key=lambda position: -occurrences.count_of(words[position])
+    )[:N_DRAWN]
+
+    learned = Word2Vec(
+        dimension=BOOK_DIMENSION,
+        window=BOOK_WINDOW,
+        epochs=BOOK_EPOCHS,
+        learning_rate=0.05,
+        minimum_count=BOOK_MINIMUM_COUNT,
+        random_seed=0,
+    ).fit(list(BOOK_SENTENCES))
+    space = learned.embeddings
+    learned_rows = np.stack(
+        [np.asarray(space.vector_of(word).values, dtype=np.float64) for word in words]
+    )
+
+    def projection(name: str, rows: np.ndarray, width: int) -> SpaceProjection:
+        placed, kept = _on_a_sphere(rows)
+        return SpaceProjection(
+            name=name,
+            width=width,
+            kept_share=kept,
+            words=[
+                PlacedWord(
+                    word=words[position],
+                    count=occurrences.count_of(words[position]),
+                    x=float(placed[position][0]),
+                    y=float(placed[position][1]),
+                    z=float(placed[position][2]),
+                )
+                for position in drawn
+            ],
+        )
+
+    toy = np.asarray(_counting().table, dtype=np.float64)
+    return BookSpaceResponse(
+        corpus="Alice's Adventures in Wonderland, chapters one to three",
+        n_sentences=len(BOOK_SENTENCES),
+        n_tokens=sum(len(sentence.split()) for sentence in BOOK_SENTENCES),
+        n_distinct=len(set(" ".join(BOOK_SENTENCES).split())),
+        minimum_count=BOOK_MINIMUM_COUNT,
+        window=BOOK_WINDOW,
+        n_words=int(counts.shape[0]),
+        n_cells=int(counts.size),
+        n_zero_cells=int(np.sum(counts == 0.0)),
+        zero_share=float(np.mean(counts == 0.0)),
+        toy_n_words=int(toy.shape[0]),
+        toy_n_cells=int(toy.size),
+        toy_zero_share=float(np.mean(toy == 0.0)),
+        counted=projection("counted", counts, int(counts.shape[1])),
+        learned=projection("learned", learned_rows, BOOK_DIMENSION),
+    )
+
+
+@router.get("/book-space", response_model=BookSpaceResponse)
+def book_space() -> BookSpaceResponse:
+    """The book's words as directions, counted and learned, both drawable.
+
+    The rest of this page fits on a corpus built by hand, because two labelled
+    lists give a fit a score and a book does not. What a book gives instead is
+    scale, which is the only way to show that the zeros take over rather than
+    to assert it, and enough words that a picture of the space is worth
+    drawing at all.
+    """
+    return _book_space()

@@ -500,3 +500,56 @@ def _strings(value: object) -> list[str]:
     if isinstance(value, list):
         return [text for entry in value for text in _strings(entry)]
     return []
+
+
+class TestTheBookSpace:
+    """The book's words as directions, which is what the flat table replaced."""
+
+    def test_the_vocabulary_is_a_few_hundred_words(self):
+        answer = client.get("/concepts/word2vec/book-space").json()
+
+        assert answer["n_words"] == 364
+        assert answer["minimum_count"] == 3
+
+    def test_the_table_is_mostly_empty_and_far_emptier_than_the_small_one(self):
+        """The growth claim, measured at two sizes rather than extrapolated."""
+        answer = client.get("/concepts/word2vec/book-space").json()
+
+        assert answer["n_cells"] == 364 * 364
+        assert answer["zero_share"] > 0.89
+        assert answer["toy_zero_share"] < 0.46
+        assert answer["zero_share"] > answer["toy_zero_share"]
+
+    def test_every_drawn_word_is_on_the_unit_sphere(self):
+        answer = client.get("/concepts/word2vec/book-space").json()
+
+        for projection in (answer["counted"], answer["learned"]):
+            for word in projection["words"]:
+                radius = (word["x"] ** 2 + word["y"] ** 2 + word["z"] ** 2) ** 0.5
+                assert radius == pytest.approx(1.0, abs=1e-12)
+
+    def test_the_drawing_is_a_subset_and_the_projection_is_not(self):
+        answer = client.get("/concepts/word2vec/book-space").json()
+
+        assert len(answer["counted"]["words"]) == 90
+        assert len(answer["counted"]["words"]) < answer["n_words"]
+
+    def test_the_learned_description_is_the_genuinely_smaller_one(self):
+        """Three directions hold far more of the learned spread than the counted.
+
+        The page's whole argument, as a number: a row of counts is wide because
+        the vocabulary is wide, where a fitted vector is narrow because the
+        structure was.
+        """
+        answer = client.get("/concepts/word2vec/book-space").json()
+
+        assert answer["counted"]["width"] == 364
+        assert answer["learned"]["width"] == 24
+        assert answer["learned"]["kept_share"] > 3 * answer["counted"]["kept_share"]
+
+    def test_both_descriptions_place_the_same_words(self):
+        answer = client.get("/concepts/word2vec/book-space").json()
+
+        counted = [word["word"] for word in answer["counted"]["words"]]
+        learned = [word["word"] for word in answer["learned"]["words"]]
+        assert counted == learned
