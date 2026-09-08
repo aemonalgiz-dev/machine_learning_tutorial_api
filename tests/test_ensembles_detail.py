@@ -9,6 +9,7 @@ quotes is pinned here, along with the refusals the failure contracts list.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from itertools import pairwise
 from typing import ClassVar
 
@@ -19,6 +20,7 @@ from oop_ml_api.main import create_app
 
 client = TestClient(create_app())
 
+BOOSTING = "/concepts/ensembles/gradient-boosting"
 MODEL = "/concepts/ensembles/boosting-model"
 ROUNDS = "/concepts/ensembles/boosting-rounds"
 CURVES = "/concepts/ensembles/boosting-curves"
@@ -508,3 +510,55 @@ class TestVersusBagging:
 
         assert too_many.status_code == 422
         assert too_few.status_code == 422
+
+
+def _every_string(answer: object) -> Iterator[str]:
+    """Every string anywhere inside one answered body, keys included."""
+    if isinstance(answer, str):
+        yield answer
+    elif isinstance(answer, dict):
+        for key, value in answer.items():
+            yield key
+            yield from _every_string(value)
+    elif isinstance(answer, list):
+        for item in answer:
+            yield from _every_string(item)
+
+
+class TestNothingAnsweredNamesTheCode:
+    """A reader sees these sentences, so none of them may name what wrote them.
+
+    A refusal in words is the one place prose crosses from here to the page,
+    and a class name, a module name or a mention of what sits underneath
+    teaches a reader nothing. Every string in every body is walked rather
+    than the refusals alone, so a sentence that grows such a name later fails
+    here rather than in front of somebody reading the page.
+    """
+
+    FORBIDDEN: ClassVar[tuple[str, ...]] = ("library", "oop_ml", "the API")
+
+    CALLS: ClassVar[list[tuple[str, dict]]] = [
+        (BOOSTING, {"points": THREE_READINGS, "rounds": 5, "learning_rate": 0.5}),
+        (BOOSTING, {"points": THREE_READINGS, "rounds": 5, "learning_rate": 1.5}),
+        (MODEL, {"points": THREE_READINGS, "rounds": 5, "learning_rate": 0.5}),
+        (MODEL, {"points": THREE_READINGS, "rounds": 5, "learning_rate": 1.5}),
+        (MODEL, {"points": CONSTANT_HEIGHTS, "rounds": 5, "learning_rate": 0.5}),
+        (ROUNDS, {"points": THREE_READINGS, "rounds": 5, "learning_rate": 0.5}),
+        (ROUNDS, {"points": THREE_READINGS, "rounds": 5, "learning_rate": 1.5}),
+        (
+            CURVES,
+            {
+                "points": SIXTY_THROW,
+                "max_rounds": 5,
+                "configurations": [{"learning_rate": 0.3, "max_depth": 1}],
+            },
+        ),
+        (VERSUS, {"points": SIXTY_THROW, "n_members": 5, "learning_rate": 0.3}),
+    ]
+
+    def test_no_answered_string_names_the_code(self) -> None:
+        for path, request in self.CALLS:
+            answered = client.post(path, json=request).json()
+            for sentence in _every_string(answered):
+                for name in self.FORBIDDEN:
+                    assert name not in sentence, f"{path}: {sentence}"

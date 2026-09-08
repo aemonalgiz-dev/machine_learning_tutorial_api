@@ -27,6 +27,7 @@ from oop_ml_api.main import create_app
 
 client = TestClient(create_app())
 
+RECALL = "/concepts/hopfield/recall"
 STORAGE = "/concepts/hopfield/storage"
 WALK = "/concepts/hopfield/walk-by-unit"
 STATES = "/concepts/hopfield/states"
@@ -571,6 +572,85 @@ class TestContracts:
         assert len(probes) == 23
         for probe in probes.values():
             assert (probe["outcome"] == "refused") == (probe["error"] is not None)
+
+
+def every_string(value: object) -> list[str]:
+    """Every string anywhere inside one response, however deeply nested."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in every_string(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in every_string(item)]
+    return []
+
+
+FORBIDDEN_WORDS = ("library", "oop_ml", "the api")
+"""Words that would name the code behind the page to somebody reading it."""
+
+
+class TestNothingNamesTheCodeBehindThePage:
+    """The page quotes these strings, so none of them may name what wrote it.
+
+    A reason, a stopping word and a refusal all travel from here to the page
+    unchanged, which is why they are checked where they are written rather
+    than where they land. A message that starts naming the code again fails
+    here rather than reaching a reader who has never seen it.
+    """
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            (
+                RECALL,
+                {
+                    "patterns": [FIRST_PATTERN, SECOND_PATTERN],
+                    "probe": FIRST_UNIT_FLIPPED,
+                },
+            ),
+            (STORAGE, {"patterns": THREE_SHAPES}),
+            (
+                WALK,
+                {
+                    "patterns": THREE_SHAPES,
+                    "probe": flipped_at(T_SHAPE, FIRST_SCRAMBLE),
+                },
+            ),
+            (STATES, {"patterns": THREE_SHAPES, "states": [T_SHAPE]}),
+            (
+                SELF_CONNECTION,
+                {
+                    "patterns": [FIRST_PATTERN, SECOND_PATTERN],
+                    "probe": FIRST_UNIT_FLIPPED,
+                    "self_weight": 1.0,
+                },
+            ),
+        ],
+    )
+    def test_no_answer_to_a_request_names_it(self, path: str, body: dict) -> None:
+        for text in every_string(posted(path, body)):
+            for word in FORBIDDEN_WORDS:
+                assert word not in text.lower(), f"{path}: {text}"
+
+    @pytest.mark.parametrize("path", [CAPACITY, CONTRACTS])
+    def test_no_fetched_answer_names_it(self, path: str) -> None:
+        response = client.get(path)
+        assert response.status_code == 200
+
+        for text in every_string(response.json()):
+            for word in FORBIDDEN_WORDS:
+                assert word not in text.lower(), f"{path}: {text}"
+
+    def test_no_refusal_names_it_either(self) -> None:
+        response = client.post(
+            RECALL,
+            json={"patterns": [[1, 1, 0, -1], SECOND_PATTERN], "probe": FIRST_PATTERN},
+        )
+        assert response.status_code == 422
+
+        for text in every_string(response.json()):
+            for word in FORBIDDEN_WORDS:
+                assert word not in text.lower(), text
 
 
 class TestWhatThePageQuotes:

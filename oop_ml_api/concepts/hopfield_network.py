@@ -555,7 +555,7 @@ def _replayed_visits(
 
         if not np.array_equal(state, recall_pass.state_after.values):
             raise RuntimeError(
-                f"the unit-by-unit replay parted from the library's walk on "
+                f"the unit-by-unit replay parted from the recorded walk on "
                 f"sweep {recall_pass.pass_number}"
             )
 

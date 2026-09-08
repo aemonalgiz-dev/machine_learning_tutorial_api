@@ -162,7 +162,8 @@ def gradient_boosting(request: BoostingRequest) -> BoostingResponse:
             detail=(
                 "past a learning rate of 1 each round's correction overshoots "
                 "the very mistake it just fitted, so the fit gets worse round "
-                "by round, and the library refuses to build such a model"
+                "by round, and a committee at such a rate is refused rather "
+                "than built"
             ),
         )
 
@@ -1125,8 +1126,8 @@ FITTED_TARGETS_SHOWN = 3
 
 RATE_PAST_ONE = (
     "past a learning rate of 1 each round's correction overshoots the very "
-    "mistake it just fitted, so the fit gets worse round by round, and the "
-    "library refuses to build such a model"
+    "mistake it just fitted, so the fit gets worse round by round, and a "
+    "committee at such a rate is refused rather than built"
 )
 
 

@@ -1467,7 +1467,7 @@ def _probe(name: str, attempt: str, action: Callable[[], str]) -> EdgeCase:
             error=type(refusal).__name__,
             detail=str(refusal),
             library_error=True,
-            outcome="refused, in the library's own words",
+            outcome="refused, in words written to be read",
         )
     except Exception as failure:  # noqa: BLE001 - reporting it is the point
         return EdgeCase(
@@ -1477,7 +1477,7 @@ def _probe(name: str, attempt: str, action: Callable[[], str]) -> EdgeCase:
             error=type(failure).__name__,
             detail=str(failure),
             library_error=False,
-            outcome="refused, though not in the library's own words",
+            outcome="refused, though not in words written to be read",
         )
     return EdgeCase(
         name=name,
@@ -1808,7 +1808,7 @@ def _join_attempts() -> list[JoinAttempt]:
             page_layer.shape.answers,
         ),
         _join(
-            "the library's own example, joined the same wrong way",
+            "the full-size example, a 28 by 28 picture, joined the same wrong way",
             library_layer,
             [library_layer, _dense_reading(library_answers, 10)],
             (library_answers,),

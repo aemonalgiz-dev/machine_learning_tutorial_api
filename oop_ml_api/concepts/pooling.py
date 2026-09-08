@@ -842,7 +842,7 @@ def _probe(name: str, attempt: str, action: Callable[[], str]) -> EdgeCase:
             error=type(failure).__name__,
             detail=str(failure),
             library_error=False,
-            outcome="refused, though not in the library's own words",
+            outcome="refused, though not in words written to be read",
         )
     return EdgeCase(
         name=name,

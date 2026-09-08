@@ -520,3 +520,76 @@ class TestTheOverlapAccounting:
     ) -> None:
         assert max(max(row) for row in self.blame_under(kind, 2)) == disjoint
         assert max(max(row) for row in self.blame_under(kind, 1)) == overlapping
+
+
+def every_string_in(value: object) -> list[str]:
+    """Every string anywhere inside a decoded body, however deeply nested."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [found for each in value.values() for found in every_string_in(each)]
+    if isinstance(value, list):
+        return [found for each in value for found in every_string_in(each)]
+    return []
+
+
+FORBIDDEN_WORDS = ("library", "oop_ml", "the api")
+"""What a sentence shown to a reader may never name."""
+
+
+class TestNothingReturnedNamesWhatProducedIt:
+    """The website prints these sentences, so none of them may name the code.
+
+    A reader meeting the pooling page has no reason to know what any of it is
+    written in, and a sentence that says so is a sentence about the wrong
+    thing. Every endpoint here is called and every string in what comes back is
+    read, so wording that starts naming its owner again fails at this test
+    rather than reaching a page.
+    """
+
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            (
+                "/concepts/pooling/apply",
+                {"picture": PATCH, "window": 2, "stride": 2, "kind": "max"},
+            ),
+            (
+                "/concepts/pooling/share-totals",
+                {"kind": "average", "largest_side": 8},
+            ),
+            (
+                GEOMETRY,
+                {
+                    "channels": 1,
+                    "height": 8,
+                    "width": 8,
+                    "windows": [2],
+                    "strides": [2],
+                },
+            ),
+            (WINDOW, {"window": [[1, 5], [4, 2]]}),
+            (
+                SHIFT,
+                {
+                    "picture": vertical_stroke(2),
+                    "window": 2,
+                    "stride": 2,
+                    "shifts": [0, 1],
+                },
+            ),
+            (EDGE_CASES, None),
+        ],
+    )
+    def test_no_sentence_an_endpoint_returns_names_the_code_behind_it(
+        self, path: str, payload: dict | None
+    ) -> None:
+        if payload is None:
+            response = client.get(path)
+        else:
+            response = client.post(path, json=payload)
+        assert response.status_code == 200
+
+        for sentence in every_string_in(response.json()):
+            for forbidden in FORBIDDEN_WORDS:
+                assert forbidden not in sentence.lower(), f"{path}: {sentence}"
