@@ -67,3 +67,21 @@ of the layer.
 | `GET` | `/health` | liveness, touches no library code |
 | `POST` | `/concepts/simple-linear-regression/fit` | fit a line to points; returns slope, intercept, R², the fitted line, and per-point residuals |
 | `GET` | `/docs` | interactive OpenAPI documentation |
+
+### Modern-model examples
+
+`POST /concepts/modern/<lesson-slug>` serves thirteen bounded examples for the
+modern-model lessons. Slugs match the website: `transformer-blocks`,
+`next-token-prediction`, `autoregressive-generation`, `sampling-and-temperature`,
+`autoencoders`, `variational-autoencoders`, `generative-adversarial-networks`,
+`diffusion-models`, `supervised-fine-tuning`, `low-rank-adaptation`,
+`reinforcement-learning`, `retrieval-augmented-generation`, and
+`evaluating-generative-models`.
+
+Each route has its own validated request model and defaults. Responses contain
+labeled tables, an explanation of what was calculated, and the example's scope.
+The shared implementation is `oop_ml.numpy.modern`. Most examples expose one
+operation with chosen parameters; the scalar GAN performs actual alternating
+updates and the reinforcement example trains a one-state softmax policy.
+The decoder is an inference reference, and diffusion and RAG examples
+do not claim to provide a trained denoiser or a generated answer.

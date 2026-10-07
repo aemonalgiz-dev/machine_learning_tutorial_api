@@ -58,11 +58,13 @@ from oop_ml_api.concepts import (
     loss_functions,
     markov_chains,
     maximum_matching,
+    modern_learning,
     morfessor,
     moses_words,
     multiclass_classification,
     mutual_information,
     n_grams,
+    network_building_blocks,
     neurons,
     normalisation_layers,
     oriented_gradients,
@@ -105,6 +107,7 @@ from oop_ml_api.primers import calculus, linear_algebra, statistics
 from oop_ml_api.warmup import warm_in_background, warming_enabled
 
 CONCEPT_ROUTERS = (
+    network_building_blocks.router,
     simple_linear_regression.router,
     polynomial_regression.router,
     penalised_regression.router,
@@ -157,6 +160,7 @@ CONCEPT_ROUTERS = (
     keypoints_and_descriptors.router,
     latent_semantic_analysis.router,
     maximum_matching.router,
+    modern_learning.router,
     morfessor.router,
     moses_words.router,
     mutual_information.router,
