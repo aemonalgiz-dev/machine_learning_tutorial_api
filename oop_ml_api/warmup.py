@@ -48,6 +48,11 @@ _NETWORK_SEEDS = (0, 1, 2)
 
 WARM_REQUESTS = (
     "/concepts/greedy-coverage/capping",
+    "/concepts/image-alignment/turn-cost",
+    "/concepts/image-alignment/orientation",
+    "/concepts/image-alignment/describe",
+    "/concepts/image-alignment/ransac",
+    "/concepts/image-alignment/pyramid",
     "/concepts/learning-boundaries-from-examples/comparison",
     "/concepts/word2vec/book-space",
     "/concepts/segmenting-with-a-hidden-model/scale",
